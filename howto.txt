@@ -1,0 +1,7 @@
+https://pandoc.org/MANUAL.html#pandocs-markdown
+
+# use reveal from unpkg.com
+pandoc -s -V theme=black -t revealjs slides.md -o index.html -V revealjs-url=https://unpkg.com/reveal.js -V width=1280 -V hight=780 -V slideNumber=true
+
+# use local reveal
+pandoc -s -V theme=black -t revealjs slides.md -o index.html -V revealjs-url=reveal.js-master -V width=1280 -V hight=780 -V slideNumber=true
