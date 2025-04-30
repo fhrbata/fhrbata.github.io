@@ -56,6 +56,7 @@
 <h1>SPBS</h1>
 <h2>single pass build system</h2>
 <h3>Proof of concept</h3>
+<h6>Apr 30 2025</h6>
 </section>
 
 <!-- SLIDE -->
@@ -64,8 +65,9 @@
 <ul>
   <li class="fragment"><a href="https://gitlab.espressif.cn:6688/espressif/esp-idf/-/merge_requests/38337">!38337 draft MR feat/spbs</a></li>
   <li class="fragment">does not share any code with current build system</li>
+  <li class="fragment">implementation in <code>tools/spbs</code></li>
   <li class="fragment">it's messy, just put together to be able to compile some simple example</li>
-  <li class="fragment">blink_spbs example in <code>examples/get-started/blink_spbs</code></li>
+  <li class="fragment"><code>blink_spbs</code> example in <code>examples/get-started/blink_spbs</code></li>
   <li class="fragment">basic targets used by idf.py are working - configure, build, menuconfig, flash</li>
 </ul>
 </section>
@@ -123,6 +125,7 @@ idf_add_menuconfig_target()
 <ul>
 <li class="fragment">replaces <code>include("$ENV{IDF_PATH}/tools/spbs/idf.cmake")</code></li>
 <li class="fragment">set everything that has to be done or could be done before calling <code>project()</code></li>
+<li class="fragment">include other cmake files - api, shim, ldgen, kconfig, manager, kconfig, ...</li>
 <li class="fragment">set global variables - IDF_VERSION, IDF_SPBS, ...</li>
 <li class="fragment">create <code>idf_build_properties</code> interface target</li>
 <li class="fragment">set build properties - IDF_PATH, IDF_PYTHON, IDF_TARGET, IDF_TARGET_ARCH, ...</li>
@@ -398,7 +401,22 @@ idf_add_menuconfig_target()
 <li class="fragment">init compile options(defines, link, compile)</li>
 <li class="fragment">include all <code>project_include.cmake</code> files</li>
 <li class="fragment"><code>idf_include_component()</code> common components</li>
-<li class="fragment">if IDF_INIT_ALL_COMPONENTS, <code>idf_include_component()</code> all found components</li>
+<li class="fragment">if <code>IDF_INIT_ALL_COMPONENTS</code>, <code>idf_include_component()</code> all found components</li>
+</ul>
+
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>components lists</h2>
+<ul>
+<li class="fragment">kept in <code>idf_build_properties</code></li>
+<li class="fragment"><code>IDF_COMPONENTS_FOUND</code> - list of component names found while examining the component directories</li>
+<li class="fragment"><code>IDF_COMPONENT_INTERFACES</code> - list of interface targets for components in the IDF_COMPONENTS_FOUND list</li>
+<li class="fragment"><code>IDF_COMPONENTS_INCLUDED</code> - list of components included in the build by using add_subdirectory through <code>idf_include_component()</code></li>
+<li class="fragment"><code>IDF_COMPONENTS_LINKED</code> - list of components used in the final link in <code>idf::library</code></li>
+<li class="fragment"><code>IDF_COMPONENTS_REQUESTED</code> - chain of component names currently included, solely for detecting circular dependencies</li>
 </ul>
 
 </section>
@@ -419,6 +437,227 @@ idf_add_menuconfig_target()
 
 </section>
 
+<!-- SLIDE -->
+<section>
+
+<h2>component's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">include component's dependencies</li>
+<li class="fragment">is not needed if all components are already included with <code>IDF_INIT_ALL_COMPONENTS</code></li>
+<li class="fragment"><code>idf_include()</code> is just a helper wrapping <code>idf_include_component()</code></li>
+</ul>
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="1" class="language-cmake">
+idf_include(COMPONENTS espressif__led_strip esp_driver_gpio)
+
+add_library(${COMPONENT_TARGET} blink.c)
+
+target_compile_options(${COMPONENT_TARGET} PRIVATE -Wno-error=unused-value)
+
+set_source_files_properties(blink.c PROPERTIES COMPILE_OPTIONS -Werror=unused-value)
+
+target_include_directories(${COMPONENT_TARGET} PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+
+target_link_libraries(${COMPONENT_TARGET} PUBLIC idf::espressif__led_strip idf::esp_driver_gpio)
+
+idf_component_set_property(${COMPONENT_NAME} IDF_COMP_WHOLE_ARCHIVE TRUE)
+
+get_target_property(sources "${COMPONENT_TARGET}" SOURCES)
+
+target_add_binary_data(${COMPONENT_TARGET} CMakeLists.txt BINARY RENAME_TO my_embed_data)
+
+target_sources(${COMPONENT_TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/blink.c)
+
+</code></pre>
+</div>
+
+</div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>component's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">component needs to create <code>COMPONENT_TARGET</code> target</li>
+<li class="fragment">for legacy components this is handled in the <code>idf_component_register()</code></li>
+</ul>
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="3,19" class="language-cmake">
+idf_include(COMPONENTS espressif__led_strip esp_driver_gpio)
+
+add_library(${COMPONENT_TARGET} blink.c)
+
+target_compile_options(${COMPONENT_TARGET} PRIVATE -Wno-error=unused-value)
+
+set_source_files_properties(blink.c PROPERTIES COMPILE_OPTIONS -Werror=unused-value)
+
+target_include_directories(${COMPONENT_TARGET} PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+
+target_link_libraries(${COMPONENT_TARGET} PUBLIC idf::espressif__led_strip idf::esp_driver_gpio)
+
+idf_component_set_property(${COMPONENT_NAME} IDF_COMP_WHOLE_ARCHIVE TRUE)
+
+get_target_property(sources "${COMPONENT_TARGET}" SOURCES)
+
+target_add_binary_data(${COMPONENT_TARGET} CMakeLists.txt BINARY RENAME_TO my_embed_data)
+
+target_sources(${COMPONENT_TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/blink.c)
+
+</code></pre>
+</div>
+
+</div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>component's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">link component's dependencies</li>
+<li class="fragment">we can add option to include the component as user defined alias</code></li>
+</ul>
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="11" class="language-cmake">
+idf_include(COMPONENTS espressif__led_strip esp_driver_gpio)
+
+add_library(${COMPONENT_TARGET} blink.c)
+
+target_compile_options(${COMPONENT_TARGET} PRIVATE -Wno-error=unused-value)
+
+set_source_files_properties(blink.c PROPERTIES COMPILE_OPTIONS -Werror=unused-value)
+
+target_include_directories(${COMPONENT_TARGET} PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+
+target_link_libraries(${COMPONENT_TARGET} PUBLIC idf::espressif__led_strip idf::esp_driver_gpio)
+
+idf_component_set_property(${COMPONENT_NAME} IDF_COMP_WHOLE_ARCHIVE TRUE)
+
+get_target_property(sources "${COMPONENT_TARGET}" SOURCES)
+
+target_add_binary_data(${COMPONENT_TARGET} CMakeLists.txt BINARY RENAME_TO my_embed_data)
+
+target_sources(${COMPONENT_TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/blink.c)
+
+</code></pre>
+</div>
+
+</div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>component's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">set component's and specific source compile options</li>
+<li class="fragment">link the component's library as whole library</li>
+<li class="fragment">embed some binary data</li>
+</ul>
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="5,7,13,15,17" class="language-cmake">
+idf_include(COMPONENTS espressif__led_strip esp_driver_gpio)
+
+add_library(${COMPONENT_TARGET} blink.c)
+
+target_compile_options(${COMPONENT_TARGET} PRIVATE -Wno-error=unused-value)
+
+set_source_files_properties(blink.c PROPERTIES COMPILE_OPTIONS -Werror=unused-value)
+
+target_include_directories(${COMPONENT_TARGET} PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+
+target_link_libraries(${COMPONENT_TARGET} PUBLIC idf::espressif__led_strip idf::esp_driver_gpio)
+
+idf_component_set_property(${COMPONENT_NAME} IDF_COMP_WHOLE_ARCHIVE TRUE)
+
+get_target_property(sources "${COMPONENT_TARGET}" SOURCES)
+
+target_add_binary_data(${COMPONENT_TARGET} CMakeLists.txt BINARY RENAME_TO my_embed_data)
+
+target_sources(${COMPONENT_TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/blink.c)
+
+</code></pre>
+</div>
+
+</div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>legacy components</h2>
+
+<ul>
+<li class="fragment">implementation in <code>tools/spbs/shim.cmake</code></li>
+<li class="fragment"><code>idf_component_register()</code> and others</li>
+<li class="fragment">uses legacy directory properties to maintain backward compatibility - include_directories, add_compile_options, link_libraries</li>
+<li class="fragment">legacy component has <code>IDF_COMP_LEGACY</code> property</li>
+</ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>incompatibilities</h2>
+
+<ul>
+<li class="fragment">BUILD_COMPONENTS
+    <ul>
+        <li>cannot exist solely because we are evaluating CMake files only once</li>
+        <li>can be replaced with <code>$<TARGET_EXISTS:...></code> generator expression</li>
+        <li>existing components in esp-idf using it were adjusted</li>
+        <li>what about components beyond our reach</li>
+    </ul>
+</li>
+<li class="fragment">components included in a recursive manner
+    <ul>
+        <li>component's CMake must initialize all the variables it uses</li>
+        <li>for example: <code>list(APPEND var ...)</code> without <code>set(var "")</code></li>
+        <li>we can prevent recursive inclusion, but it breaks the existing build system behavior</li>
+        <li>existing components in esp-idf using it were adjusted</li>
+        <li>what about components beyond our reach</li>
+    </ul>
+</li>
+<li class="fragment">we will definitely break something
+    <ul>
+        <li>impossible to achieve complete backwards compatibility with all existing components</li>
+        <li>most legacy components should function without any modifications</li>
+        <li>thanks to Ivan we have <a href="https://gitlab.espressif.cn:6688/igrokhotkov/component-cmakelists-from-registry">CMakeLists from component registry</a></li>
+    </ul>
+</li>
+</ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+<h1>demo</h1>
+</section>
+
 <!-- SLIDES END -->
 
 			</div>
@@ -436,6 +675,7 @@ idf_add_menuconfig_target()
 				hash: true,
 				width: 1920,
 				hight: 1080,
+                slideNumber: true,
 
 				// Learn about plugins: https://revealjs.com/plugins/
 				plugins: [ RevealMarkdown, RevealHighlight, RevealNotes ]
