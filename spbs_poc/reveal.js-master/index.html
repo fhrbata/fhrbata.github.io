@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+		<title>reveal.js</title>
+
+		<link rel="stylesheet" href="dist/reset.css">
+		<link rel="stylesheet" href="dist/reveal.css">
+		<link rel="stylesheet" href="dist/theme/black.css">
+
+		<!-- Theme used for syntax highlighted code -->
+		<link rel="stylesheet" href="plugin/highlight/monokai.css">
+	</head>
+	<style>
+		.reveal {
+			background-image: url('images/logo.png');
+			background-size: 10%;
+			background-position: right 10px top 10px; /* Moves the logo to the top-right */
+			background-repeat: no-repeat;
+			font-size: 2.0rem;
+		}
+
+		.container{
+			display: flex;
+		}
+
+		.col{
+			flex: 1;
+		}
+
+	        .reveal pre code {
+	        	background-color: #000000;
+	    		max-height: 100%; /* Adjust this as needed */
+	    		overflow: auto !important;
+	    		display: block;
+	    		white-space: pre; /* Ensure text wraps correctly */
+	    		font-size: 1.0rem;
+    		}
+	        .reveal code {
+	        	background-color: #000000;
+	    		max-height: 100%; /* Adjust this as needed */
+	    		overflow: auto !important;
+	    		font-size: 1.5rem;
+    		}
+	</style>
+	<body>
+		<div class="reveal">
+			<div class="slides">
+
+<!-- SLIDES START -->
+
+<!-- SLIDE -->
+<section>
+<h1>SPBS</h1>
+<h2>single pass build system</h2>
+<h3>Proof of concept</h3>
+</section>
+
+<!-- SLIDE -->
+<section>
+<h2>Proof of concept</h2>
+<ul>
+  <li class="fragment"><a href="https://gitlab.espressif.cn:6688/espressif/esp-idf/-/merge_requests/38337">!38337 draft MR feat/spbs</a></li>
+  <li class="fragment">does not share any code with current build system</li>
+  <li class="fragment">it's messy, just put together to be able to compile some simple example</li>
+  <li class="fragment">blink_spbs example in <code>examples/get-started/blink_spbs</code></li>
+  <li class="fragment">basic targets used by idf.py are working - configure, build, menuconfig, flash</li>
+</ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>project's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">cmake 3.19 - non-interface properties allowed for interface target</li>
+<li class="fragment">cmake 3.24 - WHOLE_ARCHIVE support in LINK_LIBRARY generator expression</li>
+</ul>
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="1" class="language-cmake">
+cmake_minimum_required(VERSION 3.24)
+
+include("$ENV{IDF_PATH}/tools/spbs/idf.cmake")
+
+project(myproject C CXX ASM)
+
+add_executable(blink_example "srcs/blink.c")
+
+idf_build_set_property(EXECUTABLE blink_example)
+idf_build_set_property(EXECUTABLE_NAME blink_example)
+
+idf_library(COMPONENTS blink log vfs)
+
+target_link_libraries(blink_example PRIVATE idf::library)
+
+idf_generate_project_description()
+
+idf_add_menuconfig_target()
+</code></pre>
+</div>
+
+
+</div>
+</section>
+
+
+<!-- SLIDE -->
+<section>
+
+<h2>project's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">replaces <code>include("$ENV{IDF_PATH}/tools/spbs/idf.cmake")</code></li>
+<li class="fragment">set everything that has to be done or could be done before calling <code>project()</code></li>
+<li class="fragment">set global variables - IDF_VERSION, IDF_SPBS, ...</li>
+<li class="fragment">create <code>idf_build_properties</code> interface target</li>
+<li class="fragment">set build properties - IDF_PATH, IDF_PYTHON, IDF_TARGET, IDF_TARGET_ARCH, ...</li>
+<li class="fragment">set toolchain and WHOLE_ARCHIVE</li>
+<li class="fragment">set common components</li>
+<li class="fragment">get sdkconfig defaults</li>
+</ul>
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="3" class="language-cmake">
+cmake_minimum_required(VERSION 3.24)
+
+include("$ENV{IDF_PATH}/tools/spbs/idf.cmake")
+
+project(myproject C CXX ASM)
+
+add_executable(blink_example "srcs/blink.c")
+
+idf_build_set_property(EXECUTABLE blink_example)
+idf_build_set_property(EXECUTABLE_NAME blink_example)
+
+idf_library(COMPONENTS blink log vfs)
+
+target_link_libraries(blink_example PRIVATE idf::library)
+
+idf_generate_project_description()
+
+idf_add_menuconfig_target()
+</code></pre>
+</div>
+
+
+</div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>project's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">standard cmake calls to create project and executable</li>
+</ul>
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="5-7" class="language-cmake">
+cmake_minimum_required(VERSION 3.24)
+
+include("$ENV{IDF_PATH}/tools/spbs/idf.cmake")
+
+project(myproject C CXX ASM)
+
+add_executable(blink_example "srcs/blink.c")
+
+idf_build_set_property(EXECUTABLE blink_example)
+idf_build_set_property(EXECUTABLE_NAME blink_example)
+
+idf_library(COMPONENTS blink log vfs)
+
+target_link_libraries(blink_example PRIVATE idf::library)
+
+idf_generate_project_description()
+
+idf_add_menuconfig_target()
+</code></pre>
+</div>
+
+
+</div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>project's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">workaround to generate bin image</li>
+<li class="fragment">should be replaced with something like <code>idf_generate_bin_image(blink_example)</code></li>
+</ul>
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="9-10" class="language-cmake">
+cmake_minimum_required(VERSION 3.24)
+
+include("$ENV{IDF_PATH}/tools/spbs/idf.cmake")
+
+project(myproject C CXX ASM)
+
+add_executable(blink_example "srcs/blink.c")
+
+idf_build_set_property(EXECUTABLE blink_example)
+idf_build_set_property(EXECUTABLE_NAME blink_example)
+
+idf_library(COMPONENTS blink log vfs)
+
+target_link_libraries(blink_example PRIVATE idf::library)
+
+idf_generate_project_description()
+
+idf_add_menuconfig_target()
+</code></pre>
+</div>
+
+
+</div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>project's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">core function creating the esp-idf library</li>
+<li class="fragment"><code>idf_init_components()</code></li>
+<li class="fragment">create <code>idf::library</code> interface target</li>
+<li class="fragment">include and link requested library components</li>
+<li class="fragment">add link options</li>
+<li class="fragment">add dependency on generated ldgen scripts</li>
+</ul>
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="12" class="language-cmake">
+cmake_minimum_required(VERSION 3.24)
+
+include("$ENV{IDF_PATH}/tools/spbs/idf.cmake")
+
+project(myproject C CXX ASM)
+
+add_executable(blink_example "srcs/blink.c")
+
+idf_build_set_property(EXECUTABLE blink_example)
+idf_build_set_property(EXECUTABLE_NAME blink_example)
+
+idf_library(COMPONENTS blink log vfs)
+
+target_link_libraries(blink_example PRIVATE idf::library)
+
+idf_generate_project_description()
+
+idf_add_menuconfig_target()
+</code></pre>
+</div>
+
+
+</div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>project's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">link esp-idf library to executable</li>
+<li class="fragment">generate minimal project_description.json and add menuconfig target</li>
+</ul>
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="14-18" class="language-cmake">
+cmake_minimum_required(VERSION 3.24)
+
+include("$ENV{IDF_PATH}/tools/spbs/idf.cmake")
+
+project(myproject C CXX ASM)
+
+add_executable(blink_example "srcs/blink.c")
+
+idf_build_set_property(EXECUTABLE blink_example)
+idf_build_set_property(EXECUTABLE_NAME blink_example)
+
+idf_library(COMPONENTS blink log vfs)
+
+target_link_libraries(blink_example PRIVATE idf::library)
+
+idf_generate_project_description()
+
+idf_add_menuconfig_target()
+</code></pre>
+</div>
+
+
+</div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2>project's CMakeLists.txt</h2>
+
+<div class="container">
+
+<div class="col">
+<ul>
+<li class="fragment">can be wrapped with high level function for standard projects</li>
+<li class="fragment">
+<pre><code data-trim data-noescape class="language-cmake">
+cmake_minimum_required(VERSION 3.24)
+
+include("$ENV{IDF_PATH}/tools/spbs/idf.cmake")
+
+idf_project(blink_example COMPONENTS blink log vfs)
+</code></pre>
+
+</div>
+
+<div class="col">
+<pre><code data-trim data-noescape data-line-numbers="5-18" class="language-cmake">
+cmake_minimum_required(VERSION 3.24)
+
+include("$ENV{IDF_PATH}/tools/spbs/idf.cmake")
+
+project(myproject C CXX ASM)
+
+add_executable(blink_example "srcs/blink.c")
+
+idf_build_set_property(EXECUTABLE blink_example)
+idf_build_set_property(EXECUTABLE_NAME blink_example)
+
+idf_library(COMPONENTS blink log vfs)
+
+target_link_libraries(blink_example PRIVATE idf::library)
+
+idf_generate_project_description()
+
+idf_add_menuconfig_target()
+</code></pre>
+
+</li>
+</ul>
+
+</div>
+
+
+</div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2><code>idf_init_components()</code></h2>
+<ul>
+<li class="fragment">init component directories</li>
+<li class="fragment">for each component do basic initialization</li>
+	<ul>
+	<li class="fragment">create interface target and alias</li>
+	<li class="fragment">component interface target used also for component properties</li>
+	<li class="fragment">set basic component properties - IDF_COMP_NAME, IDF_COMP_INTERFACE, IDF_COMP_TARGET, ...</li>
+	<li class="fragment">collect component's kconfig files</li>
+	</ul>
+<li class="fragment">generate sdkconfig</li>
+<li class="fragment">call component manager and repeat initialization for new components</li>
+<li class="fragment">init ldgen interface</li>
+<li class="fragment">include cmake's sdkconfig</li>
+<li class="fragment">init compile options(defines, link, compile)</li>
+<li class="fragment">include all <code>project_include.cmake</code> files</li>
+<li class="fragment"><code>idf_include_component()</code> common components</li>
+<li class="fragment">if IDF_INIT_ALL_COMPONENTS, <code>idf_include_component()</code> all found components</li>
+</ul>
+
+</section>
+
+<!-- SLIDE -->
+<section>
+
+<h2><code>idf_include_component()</code></h2>
+<ul>
+<li class="fragment">main function to add component's real target</li>
+<li class="fragment">set variables expected by legacy build system - COMPONENT_NAME, COMPONENT_LIB, COMPONENT_TARGET, ...</li>
+<li class="fragment">call <code>add_subdirectory()</code> for component's directory</li>
+<li class="fragment">legacy component is handled shim.cmake, which contains idf_component_register and other wrappers</li>
+<li class="fragment">component has to create <code>COMPONENT_TARGET</code> target</li>
+<li class="fragment">add compile options</li>
+<li class="fragment">link common components</li>
+</ul>
+
+</section>
+
+<!-- SLIDES END -->
+
+			</div>
+		</div>
+
+		<script src="dist/reveal.js"></script>
+		<script src="plugin/notes/notes.js"></script>
+		<script src="plugin/markdown/markdown.js"></script>
+		<script src="plugin/highlight/highlight.js"></script>
+		<script>
+			// More info about initialization & config:
+			// - https://revealjs.com/initialization/
+			// - https://revealjs.com/config/
+			Reveal.initialize({
+				hash: true,
+				width: 1920,
+				hight: 1080,
+
+				// Learn about plugins: https://revealjs.com/plugins/
+				plugins: [ RevealMarkdown, RevealHighlight, RevealNotes ]
+			});
+		</script>
+	</body>
+</html>
