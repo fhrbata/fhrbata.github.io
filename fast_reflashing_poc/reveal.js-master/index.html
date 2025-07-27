@@ -1,0 +1,1539 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+		<title>Fast reflashing PoC</title>
+
+		<link rel="stylesheet" href="dist/reset.css">
+		<link rel="stylesheet" href="dist/reveal.css">
+		<link rel="stylesheet" href="dist/theme/black.css">
+
+		<!-- Theme used for syntax highlighted code -->
+        <link rel="stylesheet" href="plugin/highlight/xt256.css">
+
+	</head>
+	<style>
+		.reveal {
+			background-image: url('images/logo.png');
+			background-size: 10%;
+			background-position: right 10px top 10px; /* Moves the logo to the top-right */
+			background-repeat: no-repeat;
+			font-size: 2.0rem;
+		}
+
+		.container{
+			display: flex;
+		}
+
+		.col{
+			flex: 1;
+            min-width: 0;
+            justify-content: center;
+		}
+
+        .reveal pre {
+            background-color: #000000;
+            overflow: auto;         /* scroll when content exceeds */
+            background-color: #000;
+            font-size: 1rem;
+            padding: 1em;
+            box-sizing: border-box;
+            white-space: pre;       /* no wrapping; change to pre-wrap if you want wrap */
+        }
+
+        /* Optional: styling the code inside */
+        .reveal pre code {
+            max-height: 600px;
+            background-color: #000000;
+            display: block;
+        }
+	</style>
+	<body>
+		<div class="reveal">
+			<div class="slides">
+
+<!-- SLIDES START -->
+
+<!-- SLIDE -->
+<section>
+    <h1>fast reflashing</h1>
+    <h3>Proof of concept</h3>
+    <h6>July 29 2025</h6>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>Overview</h2>
+    <ul>
+        <li class="fragment">symbol journey</li>
+        <li class="fragment">ldgen overview</li>
+        <li class="fragment">ldgen modification</li>
+        <li class="fragment">fast_reflash.py</li>
+        <li class="fragment">demo</li>
+        <li class="fragment">next steps</li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>Proof of concept</h2>
+    <ul>
+        <li class="fragment"><a href="https://gitlab.espressif.cn:6688/espressif/esp-idf/-/merge_requests/39371">!39371 draft MR feat/fast_reflashing</a></li>
+        <li class="fragment"><a href="https://jira.espressif.com:8443/browse/IDF-10268">Jira IDF-10268</a></li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>Symbol Journey</h2>
+    <ul>
+        <li>c source code</li>
+        <li>preprocessor</li>
+        <li>compilator (.c → .s)</li>
+        <li>assembler (.s → .o)</li>
+        <li>linker (.o → elf executable)</li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+    <h2>Symbol Journey</h2>
+
+    <div class="container">
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="2,5,8-9,13" class="language-c">
+// goes to .bss/.sbss section by default
+int MY_BSS;
+
+// goes to .data/.sdata section by default
+int MY_DATA = 1;
+
+// goes to custom .my_function section(IRAM_ATTR, DRAM_ATTR)
+__attribute__((section(".my_function")))
+void MY_FUNCTION(void)
+{
+}
+
+int main(int argc, const char *argv[])
+{
+    MY_FUNCTION();
+    return 0;
+}
+            </code></pre>
+            <code>cat main.c</code>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="8,12,15,19,21,25,36,40" class="language-x86asm">
+	.file	"main.c"
+	.option nopic
+	.attribute arch, "rv32i2p1_m2p0_a2p1_f2p2_d2p2_c2p0_zicsr2p0_zifencei2p0"
+	.attribute unaligned_access, 0
+	.attribute stack_align, 16
+	.text
+	.globl	MY_BSS
+	.section	.sbss,"aw",@nobits
+	.align	2
+	.type	MY_BSS, @object
+	.size	MY_BSS, 4
+MY_BSS:
+	.zero	4
+	.globl	MY_DATA
+	.section	.sdata,"aw"
+	.align	2
+	.type	MY_DATA, @object
+	.size	MY_DATA, 4
+MY_DATA:
+	.word	1
+	.section	.my_function,"ax",@progbits
+	.align	1
+	.globl	MY_FUNCTION
+	.type	MY_FUNCTION, @function
+MY_FUNCTION:
+	addi	sp,sp,-16
+	sw	ra,12(sp)
+	sw	s0,8(sp)
+	addi	s0,sp,16
+	nop
+	lw	ra,12(sp)
+	lw	s0,8(sp)
+	addi	sp,sp,16
+	jr	ra
+	.size	MY_FUNCTION, .-MY_FUNCTION
+	.text
+	.align	1
+	.globl	main
+	.type	main, @function
+main:
+	addi	sp,sp,-32
+	sw	ra,28(sp)
+	sw	s0,24(sp)
+	addi	s0,sp,32
+	sw	a0,-20(s0)
+	sw	a1,-24(s0)
+	call	MY_FUNCTION
+	li	a5,0
+	mv	a0,a5
+	lw	ra,28(sp)
+	lw	s0,24(sp)
+	addi	sp,sp,32
+	jr	ra
+	.size	main, .-main
+	.ident	"GCC: (crosstool-NG esp-14.2.0_20241119) 14.2.0"
+	.section	.note.GNU-stack,"",@progbits
+            </code></pre>
+            <code>riscv32-esp-elf-gcc -o main.s -S main.c</code>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+    <h2>Symbol Journey</h2>
+
+    <div class="container">
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="8,12,15,19,21,25,36,40" class="language-x86asm">
+	.file	"main.c"
+	.option nopic
+	.attribute arch, "rv32i2p1_m2p0_a2p1_f2p2_d2p2_c2p0_zicsr2p0_zifencei2p0"
+	.attribute unaligned_access, 0
+	.attribute stack_align, 16
+	.text
+	.globl	MY_BSS
+	.section	.sbss,"aw",@nobits
+	.align	2
+	.type	MY_BSS, @object
+	.size	MY_BSS, 4
+MY_BSS:
+	.zero	4
+	.globl	MY_DATA
+	.section	.sdata,"aw"
+	.align	2
+	.type	MY_DATA, @object
+	.size	MY_DATA, 4
+MY_DATA:
+	.word	1
+	.section	.my_function,"ax",@progbits
+	.align	1
+	.globl	MY_FUNCTION
+	.type	MY_FUNCTION, @function
+MY_FUNCTION:
+	addi	sp,sp,-16
+	sw	ra,12(sp)
+	sw	s0,8(sp)
+	addi	s0,sp,16
+	nop
+	lw	ra,12(sp)
+	lw	s0,8(sp)
+	addi	sp,sp,16
+	jr	ra
+	.size	MY_FUNCTION, .-MY_FUNCTION
+	.text
+	.align	1
+	.globl	main
+	.type	main, @function
+main:
+	addi	sp,sp,-32
+	sw	ra,28(sp)
+	sw	s0,24(sp)
+	addi	s0,sp,32
+	sw	a0,-20(s0)
+	sw	a1,-24(s0)
+	call	MY_FUNCTION
+	li	a5,0
+	mv	a0,a5
+	lw	ra,28(sp)
+	lw	s0,24(sp)
+	addi	sp,sp,32
+	jr	ra
+	.size	main, .-main
+	.ident	"GCC: (crosstool-NG esp-14.2.0_20241119) 14.2.0"
+	.section	.note.GNU-stack,"",@progbits
+            </code></pre>
+            <code>riscv32-esp-elf-as -o main.o main.s</code>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="14-17" class="language-c">
+main.o:     file format elf32-littleriscv
+
+SYMBOL TABLE:
+00000000 l    df *ABS*	00000000 main.c
+00000000 l    d  .text	00000000 .text
+00000000 l    d  .data	00000000 .data
+00000000 l    d  .bss	00000000 .bss
+00000000 l    d  .sbss	00000000 .sbss
+00000000 l    d  .sdata	00000000 .sdata
+00000000 l    d  .my_function	00000000 .my_function
+00000000 l    d  .note.GNU-stack	00000000 .note.GNU-stack
+00000000 l    d  .comment	00000000 .comment
+00000000 l    d  .riscv.attributes	00000000 .riscv.attributes
+00000000 g     O .sbss	00000004 MY_BSS
+00000000 g     O .sdata	00000004 MY_DATA
+00000000 g     F .my_function	00000012 MY_FUNCTION
+00000000 g     F .text	00000024 main
+            </code></pre>
+            <code>riscv32-esp-elf-objdump -t main.o</code>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE -->
+<section>
+
+    <h2>Symbol Journey</h2>
+
+    <div class="container">
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="14-17" class="language-c">
+main.o:     file format elf32-littleriscv
+
+SYMBOL TABLE:
+00000000 l    df *ABS*	00000000 main.c
+00000000 l    d  .text	00000000 .text
+00000000 l    d  .data	00000000 .data
+00000000 l    d  .bss	00000000 .bss
+00000000 l    d  .sbss	00000000 .sbss
+00000000 l    d  .sdata	00000000 .sdata
+00000000 l    d  .my_function	00000000 .my_function
+00000000 l    d  .note.GNU-stack	00000000 .note.GNU-stack
+00000000 l    d  .comment	00000000 .comment
+00000000 l    d  .riscv.attributes	00000000 .riscv.attributes
+00000000 g     O .sbss	00000004 MY_BSS
+00000000 g     O .sdata	00000004 MY_DATA
+00000000 g     F .my_function	00000012 MY_FUNCTION
+00000000 g     F .text	00000024 main
+            </code></pre>
+            <code>riscv32-esp-elf-ld -e main -o main main.o</code>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="11,12,15,18" class="language-c">
+main:     file format elf32-littleriscv
+
+SYMBOL TABLE:
+000100b4 l    d  .text	00000000 .text
+000100d2 l    d  .my_function	00000000 .my_function
+000110e4 l    d  .sdata	00000000 .sdata
+000110e8 l    d  .sbss	00000000 .sbss
+00000000 l    d  .comment	00000000 .comment
+00000000 l    d  .riscv.attributes	00000000 .riscv.attributes
+00000000 l    df *ABS*	00000000 main.c
+000110e8 g     O .sbss	00000004 MY_BSS
+000100d2 g     F .my_function	00000012 MY_FUNCTION
+000118e4 g       *ABS*	00000000 __global_pointer$
+000110e4 g       .sdata	00000000 __SDATA_BEGIN__
+000110e4 g     O .sdata	00000004 MY_DATA
+000110ec g       .sbss	00000000 __BSS_END__
+000110e8 g       .sbss	00000000 __bss_start
+000100b4 g     F .text	0000001e main
+000110e4 g       .sdata	00000000 __DATA_BEGIN__
+000110e8 g       .sdata	00000000 _edata
+000110ec g       .sbss	00000000 _end
+            </code></pre>
+            <code>riscv32-esp-elf-objdump -t main</code>
+        </div>
+
+    </div>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>Linker</h2>
+    <ul>
+        <li class="fragment">Combines multiple input object and archive files into a single output executable.</li>
+        <li class="fragment">Performs relocation, resolves symbol references, applies relaxations, and manages memory layout.</li>
+        <li class="fragment">The layout and organization of the output executable is governed by linker scripts written in the Linker Command Language.</li>
+        <li class="fragment"><a href="https://sourceware.org/binutils/docs/ld.html">GNU linker ld</a></li>
+        <li class="fragment"><a href="https://eli.thegreenplace.net/2013/07/09/library-order-in-static-linking#the-linking-process">Library order in static linking (Eli Bendersky)</a></li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>Linker script</h2>
+    <ul>
+        <li class="fragment">The main purpose of the linker script is to describe how the sections in the input files should be mapped into the output file.</li>
+        <li class="fragment"><code>ld --verbose</code> default linker script, not used by ESP-IDF applications.</li>
+        <li class="fragment"><a href="https://sourceware.org/binutils/docs/ld.html#MEMORY">MEMORY Command</a></li>
+        <li class="fragment"><a href="https://sourceware.org/binutils/docs/ld.html#SECTIONS">SECTIONS Command</a></li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>Memory command</h2>
+    <ul>
+        <li class="fragment">Describes memory regions the linker may use
+            <pre><code data-trim data-noescape class="language-c">
+MEMORY
+  {
+    name [(attr)] : ORIGIN = origin, LENGTH = len
+    ...
+  }
+            </code></pre>
+        </li>
+        <li class="fragment">Sections may be assigned to particular memory regions</li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>MEMORY command</h2>
+    <ul>
+        <li class="fragment">Default configuration permits allocation of all available memory
+            <pre><code data-trim data-noescape data-line-numbers="" class="language-c">
+            Memory Configuration
+
+Name             Origin             Length             Attributes
+*default*        0x00000000         0xffffffff
+            </code></pre>
+        </li>
+
+        <li class="fragment">ESP32C3 memory regions
+            <pre><code data-trim data-noescape data-line-numbers="" class="language-c">
+            Memory Configuration
+
+Name             Origin             Length             Attributes
+iram0_0_seg      0x40380000         0x0004e710         xr
+iram0_2_seg      0x42000020         0x007fffe0         xr
+dram0_0_seg      0x3fc80000         0x0004e710         rw
+drom0_0_seg      0x3c000020         0x007fffe0         r
+rtc_iram_seg     0x50000000         0x00001fe8         xrw
+rtc_reserved_seg 0x50001fe8         0x00000018         rw
+*default*        0x00000000         0xffffffff
+            </code></pre>
+        </li>
+    </ul>
+</section>
+
+
+<!-- SLIDE -->
+<section>
+    <h2>SECTIONS command</h2>
+    <ul>
+        <li class="fragment">Instructs linker how to map input sections into output sections, and how to place the output sections in memory
+            <pre><code data-trim data-noescape data-line-numbers="1,8,11" class="language-c">
+section [address] [(type)] :
+  [AT(lma)]
+  [ALIGN(section_align) | ALIGN_WITH_INPUT]
+  [SUBALIGN(subsection_align)]
+  [constraint]
+  {
+    output-section-command
+    output-section-command(Input Section Description)
+    output-section-command
+    ...
+  } [>region] [AT>lma_region] [:phdr :phdr ...] [=fillexp] [,]
+            </code></pre>
+        </li>
+
+        <li class="fragment">Input Section Description
+            <pre>
+filename[(list of input section names)]
+
+filename:
+   'file' - matches file
+   'archive:file' - matches file within archive
+   'archive:' - matches the whole archive
+   ':file' - matches file but not one in an archive
+            </pre>
+        </li>
+
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section data-transition="slide-in none-out">
+    <h2>Input Section Description</h2>
+    <pre><code data-trim data-noescape data-line-numbers="1" class="language-c">
+main.o(.text)
+*main.o(.text)
+*(.text)
+*(.text .text.*)
+*libgcov.a:(literal .literal.* .text .text.*)
+*libhal.a:cache_hal.*(.literal .literal.* .text .text.*)
+*libfreertos.a:(EXCLUDE_FILE (*libfreertos.a:app_startup.*) .text)
+    </code></pre>
+</section>
+
+<!-- SLIDE -->
+<section data-transition="none">
+    <h2>Input Section Description</h2>
+    <pre><code data-trim data-noescape data-line-numbers="2" class="language-c">
+main.o(.text)
+*main.o(.text)
+*(.text)
+*(.text .text.*)
+*libgcov.a:(literal .literal.* .text .text.*)
+*libhal.a:cache_hal.*(.literal .literal.* .text .text.*)
+*libfreertos.a:(EXCLUDE_FILE (*libfreertos.a:app_startup.*) .text)
+    </code></pre>
+</section>
+
+<!-- SLIDE -->
+<section data-transition="none">
+    <h2>Input Section Description</h2>
+    <pre><code data-trim data-noescape data-line-numbers="3" class="language-c">
+main.o(.text)
+*main.o(.text)
+*(.text)
+*(.text .text.*)
+*libgcov.a:(literal .literal.* .text .text.*)
+*libhal.a:cache_hal.*(.literal .literal.* .text .text.*)
+*libfreertos.a:(EXCLUDE_FILE (*libfreertos.a:app_startup.*) .text)
+    </code></pre>
+</section>
+
+<!-- SLIDE -->
+<section data-transition="none">
+    <h2>Input Section Description</h2>
+    <pre><code data-trim data-noescape data-line-numbers="4" class="language-c">
+main.o(.text)
+*main.o(.text)
+*(.text)
+*(.text .text.*)
+*libgcov.a:(literal .literal.* .text .text.*)
+*libhal.a:cache_hal.*(.literal .literal.* .text .text.*)
+*libfreertos.a:(EXCLUDE_FILE (*libfreertos.a:app_startup.*) .text)
+    </code></pre>
+</section>
+
+<!-- SLIDE -->
+<section data-transition="none">
+    <h2>Input Section Description</h2>
+    <pre><code data-trim data-noescape data-line-numbers="5" class="language-c">
+main.o(.text)
+*main.o(.text)
+*(.text)
+*(.text .text.*)
+*libgcov.a:(literal .literal.* .text .text.*)
+*libhal.a:cache_hal.*(.literal .literal.* .text .text.*)
+*libfreertos.a:(EXCLUDE_FILE (*libfreertos.a:app_startup.*) .text)
+    </code></pre>
+</section>
+
+<!-- SLIDE -->
+<section data-transition="none">
+    <h2>Input Section Description</h2>
+    <pre><code data-trim data-noescape data-line-numbers="6" class="language-c">
+main.o(.text)
+*main.o(.text)
+*(.text)
+*(.text .text.*)
+*libgcov.a:(literal .literal.* .text .text.*)
+*libhal.a:cache_hal.*(.literal .literal.* .text .text.*)
+*libfreertos.a:(EXCLUDE_FILE (*libfreertos.a:app_startup.*) .text)
+    </code></pre>
+</section>
+
+<!-- SLIDE -->
+<section data-transition="none slide-out">
+    <h2>Input Section Description</h2>
+    <pre><code data-trim data-noescape data-line-numbers="7" class="language-c">
+main.o(.text)
+*main.o(.text)
+*(.text)
+*(.text .text.*)
+*libgcov.a:(literal .literal.* .text .text.*)
+*libhal.a:cache_hal.*(.literal .literal.* .text .text.*)
+*libfreertos.a:(EXCLUDE_FILE (*libfreertos.a:app_startup.*) .text)
+    </code></pre>
+</section>
+
+<!-- SLIDE -->
+<section data-transition="none slide-out">
+    <h2>Linker script</h2>
+    <pre><code data-trim data-noescape data-line-numbers="" class="language-c">
+MEMORY
+{
+    iram (RX): org = 0x4037C000, len = 0x4000
+}
+
+SECTIONS
+{
+    .iram.text :
+    {
+       *libgcov.a:(.literal .literal.* .text .text.*)
+    } > iram
+}
+    </code></pre>
+</section>
+
+
+<!-- SLIDE -->
+<section>
+
+    <h2>Symbol Journey</h2>
+
+    <div class="container">
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="14-17" class="language-c">
+main.o:     file format elf32-littleriscv
+
+SYMBOL TABLE:
+00000000 l    df *ABS*	00000000 main.c
+00000000 l    d  .text	00000000 .text
+00000000 l    d  .data	00000000 .data
+00000000 l    d  .bss	00000000 .bss
+00000000 l    d  .sbss	00000000 .sbss
+00000000 l    d  .sdata	00000000 .sdata
+00000000 l    d  .my_function	00000000 .my_function
+00000000 l    d  .note.GNU-stack	00000000 .note.GNU-stack
+00000000 l    d  .comment	00000000 .comment
+00000000 l    d  .riscv.attributes	00000000 .riscv.attributes
+00000000 g     O .sbss	00000004 MY_BSS
+00000000 g     O .sdata	00000004 MY_DATA
+00000000 g     F .my_function	00000012 MY_FUNCTION
+00000000 g     F .text	00000024 main
+            </code></pre>
+            <code>riscv32-esp-elf-ld -e main -o main main.o</code>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="10,18,23" class="language-c">
+SECTIONS
+{
+  .text           :
+  {
+    *(.text.unlikely .text.*_unlikely .text.unlikely.*)
+    *(.text.exit .text.exit.*)
+    *(.text.startup .text.startup.*)
+    *(.text.hot .text.hot.*)
+    *(SORT(.text.sorted.*))
+    *(.text .stub .text.* .gnu.linkonce.t.*)
+    /* .gnu.warning sections are handled specially by elf.em.  */
+    *(.gnu.warning) 
+  }
+
+  }
+  .sdata          :
+  {
+    *(.sdata .sdata.* .gnu.linkonce.s.*)
+  }
+  .sbss           :
+  {
+    *(.dynsbss)
+    *(.sbss .sbss.* .gnu.linkonce.sb.*)
+    *(.scommon)
+  }
+}
+            </code></pre>
+            <code>riscv32-esp-elf-ld --verbose</code>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="11,12,15,18" class="language-c">
+main:     file format elf32-littleriscv
+
+SYMBOL TABLE:
+000100b4 l    d  .text	00000000 .text
+000100d2 l    d  .my_function	00000000 .my_function
+000110e4 l    d  .sdata	00000000 .sdata
+000110e8 l    d  .sbss	00000000 .sbss
+00000000 l    d  .comment	00000000 .comment
+00000000 l    d  .riscv.attributes	00000000 .riscv.attributes
+00000000 l    df *ABS*	00000000 main.c
+000110e8 g     O .sbss	00000004 MY_BSS
+000100d2 g     F .my_function	00000012 MY_FUNCTION
+000118e4 g       *ABS*	00000000 __global_pointer$
+000110e4 g       .sdata	00000000 __SDATA_BEGIN__
+000110e4 g     O .sdata	00000004 MY_DATA
+000110ec g       .sbss	00000000 __BSS_END__
+000110e8 g       .sbss	00000000 __bss_start
+000100b4 g     F .text	0000001e main
+000110e4 g       .sdata	00000000 __DATA_BEGIN__
+000110e8 g       .sdata	00000000 _edata
+000110ec g       .sbss	00000000 _end
+            </code></pre>
+            <code>riscv32-esp-elf-objdump -t main</code>
+        </div>
+
+    </div>
+</section>
+
+
+<!-- SLIDE -->
+<section>
+
+    <h2>Symbol Journey</h2>
+
+    <div class="container">
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="16" class="language-c">
+main.o:     file format elf32-littleriscv
+
+SYMBOL TABLE:
+00000000 l    df *ABS*	00000000 main.c
+00000000 l    d  .text	00000000 .text
+00000000 l    d  .data	00000000 .data
+00000000 l    d  .bss	00000000 .bss
+00000000 l    d  .sbss	00000000 .sbss
+00000000 l    d  .sdata	00000000 .sdata
+00000000 l    d  .my_function	00000000 .my_function
+00000000 l    d  .note.GNU-stack	00000000 .note.GNU-stack
+00000000 l    d  .comment	00000000 .comment
+00000000 l    d  .riscv.attributes	00000000 .riscv.attributes
+00000000 g     O .sbss	00000004 MY_BSS
+00000000 g     O .sdata	00000004 MY_DATA
+00000000 g     F .my_function	00000012 MY_FUNCTION
+00000000 g     F .text	00000024 main
+            </code></pre>
+            <code>riscv32-esp-elf-ld -T main.ld -e main -o main main.o</code>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="13" class="language-c">
+SECTIONS
+{
+  .text           :
+  {
+    *(.text.unlikely .text.*_unlikely .text.unlikely.*)
+    *(.text.exit .text.exit.*)
+    *(.text.startup .text.startup.*)
+    *(.text.hot .text.hot.*)
+    *(SORT(.text.sorted.*))
+    *(.text .stub .text.* .gnu.linkonce.t.*)
+    /* .gnu.warning sections are handled specially by elf.em.  */
+    *(.gnu.warning) 
+    main.o(.my_function)
+  }
+
+  }
+  .sdata          :
+  {
+    *(.sdata .sdata.* .gnu.linkonce.s.*)
+  }
+  .sbss           :
+  {
+    *(.dynsbss)
+    *(.sbss .sbss.* .gnu.linkonce.sb.*)
+    *(.scommon)
+  }
+}
+            </code></pre>
+            <code>main.ld</code>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="11" class="language-c">
+main:     file format elf32-littleriscv
+
+SYMBOL TABLE:
+000100b4 l    d  .text	00000000 .text
+000110e4 l    d  .sdata	00000000 .sdata
+000110e8 l    d  .sbss	00000000 .sbss
+00000000 l    d  .comment	00000000 .comment
+00000000 l    d  .riscv.attributes	00000000 .riscv.attributes
+00000000 l    df *ABS*	00000000 main.c
+000110e8 g     O .sbss	00000004 MY_BSS
+000100d2 g     F .text	00000012 MY_FUNCTION
+000118e4 g       *ABS*	00000000 __global_pointer$
+000110e4 g       .sdata	00000000 __SDATA_BEGIN__
+000110e4 g     O .sdata	00000004 MY_DATA
+000110ec g       .sbss	00000000 __BSS_END__
+000110e8 g       .sbss	00000000 __bss_start
+000100b4 g     F .text	0000001e main
+000110e4 g       .sdata	00000000 __DATA_BEGIN__
+000110e8 g       .sdata	00000000 _edata
+000110ec g       .sbss	00000000 _end
+            </code></pre>
+            <code>riscv32-esp-elf-objdump -t main</code>
+        </div>
+
+    </div>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>ldgen</h2>
+    <ul>
+        <li class="fragment"><a href="https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/linker-script-generation.html">ldgen documentation</a></li>
+        <li class="fragment">Linker script generator offering additional features</li>
+        <li class="fragment">Configuration support</li>
+        <li class="fragment">Symbol placement</li>
+    </ul>
+</section>
+
+
+<!-- SLIDE -->
+<section>
+    <h2>ldgen templates</h2>
+    <ul>
+        <li>MEMORY command in components/esp_system/ld/[target]/memory.ld.in</li>
+        <li>SECTIONS command in components/esp_system/ld/[target]/sections.ld.in</li>
+    </ul>
+    <div class="container">
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="8,10" class="language-c">
+MEMORY
+{
+  /* All these values assume the flash cache is on, and have the blocks this uses subtracted from the length
+  of the various regions. The 'data access port' dram/drom regions map to the same iram/irom regions but
+  are connected to the data port of the CPU and eg allow bytewise access. */
+
+  /* IRAM for PRO cpu. Not sure if happy with this, this is MMU area... */
+  iram0_0_seg (RX) :                 org = 0x40080000, len = 0x20000 + SRAM1_IRAM_LEN
+
+  dram0_0_seg (RW) :                 org = 0x3FFB0000 + CONFIG_BTDM_RESERVE_DRAM,
+                                     len = DRAM0_0_SEG_LEN - CONFIG_BTDM_RESERVE_DRAM
+}
+            </code></pre>
+           <a href="https://github.com/espressif/esp-idf/blob/master/components/esp_system/ld/esp32/memory.ld.in">esp32 memory.ld.in</a>
+        </div>
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="14,16,29,32" class="language-c">
+#include "ld.common"
+
+/* Default entry point */
+ENTRY(call_start_cpu0);
+
+SECTIONS
+{
+
+  .iram0.text :
+  {
+    /* Code marked as running out of IRAM */
+    _iram_text_start = ABSOLUTE(.);
+
+    mapping[iram0_text]
+
+  } > iram0_0_seg
+
+  .dram0.data :
+  {
+    _data_start = ABSOLUTE(.);
+    *(.gnu.linkonce.d.*)
+    *(.data1)
+    *(.sdata)
+    *(.sdata.*)
+    *(.gnu.linkonce.s.*)
+    *(.gnu.linkonce.s2.*)
+    *(.jcr)
+
+    mapping[dram0_data]
+
+    _data_end = ABSOLUTE(.);
+  } > dram0_0_seg
+}
+            </code></pre>
+            <a href="https://github.com/espressif/esp-idf/blob/master/components/esp_system/ld/esp32/sections.ld.in">esp32 sections.ld.in</a>
+        </div>
+    </div>
+</section>
+
+
+<!-- SLIDE -->
+<section>
+    <h2>Linker Fragment Files</h2>
+    <div class="container">
+        <div class="col">
+            <code>sections</code>
+            <pre><code data-trim data-noescape data-line-numbers="8" class="bash">
+[sections:text]
+entries:
+    .text
+    .text.*    # .text+
+    .literal
+    .literal.* # .literal+
+            </code></pre>
+        </div>
+        <div class="col">
+            <code>scheme</code>
+            <pre><code data-trim data-noescape data-line-numbers="8" class="bash">
+[scheme:noflash]
+entries:
+    text -> iram0_text
+    rodata -> dram0_data
+            </code></pre>
+        </div>
+        <div class="col">
+            <code>mapping</code>
+            <pre><code data-trim data-noescape data-line-numbers="8" class="bash">
+[mapping:map]
+archive: libfreertos.a
+entries:
+    * (noflash)                # archive
+    tasks (noflash)            # object
+    queue:xQueuePeek (noflash) # symbol
+            </code></pre>
+        </div>
+    </div>
+</section>
+
+
+<!-- SLIDE -->
+<section>
+    <h2>Symbol placement</h2>
+    <div class="container">
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="8,15,36" class="language-c">
+    .file   "main.c"
+    .option nopic
+    .attribute arch, "rv32i2p1_m2p0_a2p1_f2p2_d2p2_c2p0_zicsr2p0_zifencei2p0"
+    .attribute unaligned_access, 0 
+    .attribute stack_align, 16
+    .text
+    .globl  MY_BSS
+    .section    .sbss,"aw",@nobits
+    .align  2 
+    .type   MY_BSS, @object
+    .size   MY_BSS, 4 
+MY_BSS:
+    .zero   4 
+    .globl  MY_DATA
+    .section    .sdata,"aw"
+    .align  2 
+    .type   MY_DATA, @object
+    .size   MY_DATA, 4 
+MY_DATA:
+    .word   1 
+    .section    .my_function,"ax",@progbits
+    .align  1 
+    .globl  MY_FUNCTION
+    .type   MY_FUNCTION, @function
+MY_FUNCTION:
+    addi    sp,sp,-16
+    sw  ra,12(sp)
+    sw  s0,8(sp)
+    addi    s0,sp,16
+    nop
+    lw  ra,12(sp)
+    lw  s0,8(sp)
+    addi    sp,sp,16
+    jr  ra
+    .size   MY_FUNCTION, .-MY_FUNCTION
+    .text
+    .align  1 
+    .globl  main
+    .type   main, @function
+main:
+    addi    sp,sp,-32
+    sw  ra,28(sp)
+    sw  s0,24(sp)
+    addi    s0,sp,32
+    sw  a0,-20(s0)
+    sw  a1,-24(s0)
+    call    MY_FUNCTION
+    li  a5,0
+    mv  a0,a5
+    lw  ra,28(sp)
+    lw  s0,24(sp)
+    addi    sp,sp,32
+    jr  ra
+    .size   main, .-main
+    .ident  "GCC: (crosstool-NG esp-14.2.0_20241119) 14.2.0"
+    .section    .note.GNU-stack,"",@progbits
+            </code></pre>
+            <code>riscv32-esp-elf-gcc -S -o main.s main.c</code>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="8,15,36" class="language-c">
+    .file   "main.c"
+    .option nopic
+    .attribute arch, "rv32i2p1_m2p0_a2p1_f2p2_d2p2_c2p0_zicsr2p0_zifencei2p0"
+    .attribute unaligned_access, 0 
+    .attribute stack_align, 16
+    .text
+    .globl  MY_BSS
+    .section    .sbss.MY_BSS,"aw",@nobits
+    .align  2 
+    .type   MY_BSS, @object
+    .size   MY_BSS, 4 
+MY_BSS:
+    .zero   4 
+    .globl  MY_DATA
+    .section    .sdata.MY_DATA,"aw"
+    .align  2 
+    .type   MY_DATA, @object
+    .size   MY_DATA, 4 
+MY_DATA:
+    .word   1 
+    .section    .my_function,"ax",@progbits
+    .align  1 
+    .globl  MY_FUNCTION
+    .type   MY_FUNCTION, @function
+MY_FUNCTION:
+    addi    sp,sp,-16
+    sw  ra,12(sp)
+    sw  s0,8(sp)
+    addi    s0,sp,16
+    nop
+    lw  ra,12(sp)
+    lw  s0,8(sp)
+    addi    sp,sp,16
+    jr  ra
+    .size   MY_FUNCTION, .-MY_FUNCTION
+    .section    .text.main,"ax",@progbits
+    .align  1 
+    .globl  main
+    .type   main, @function
+main:
+    addi    sp,sp,-32
+    sw  ra,28(sp)
+    sw  s0,24(sp)
+    addi    s0,sp,32
+    sw  a0,-20(s0)
+    sw  a1,-24(s0)
+    call    MY_FUNCTION
+    li  a5,0
+    mv  a0,a5
+    lw  ra,28(sp)
+    lw  s0,24(sp)
+    addi    sp,sp,32
+    jr  ra
+    .size   main, .-main
+    .ident  "GCC: (crosstool-NG esp-14.2.0_20241119) 14.2.0"
+    .section    .note.GNU-stack,"",@progbits
+            </code></pre>
+            <code>riscv32-esp-elf-gcc -fdata-sections -ffunction-sections -S -o main.s main.c</code>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>Symbol placement</h2>
+    <div class="container">
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="14,15,17" class="language-c">
+main.o:     file format elf32-littleriscv
+
+SYMBOL TABLE:
+00000000 l    df *ABS*	00000000 main.c
+00000000 l    d  .text	00000000 .text
+00000000 l    d  .data	00000000 .data
+00000000 l    d  .bss	00000000 .bss
+00000000 l    d  .sbss	00000000 .sbss
+00000000 l    d  .sdata	00000000 .sdata
+00000000 l    d  .my_function	00000000 .my_function
+00000000 l    d  .note.GNU-stack	00000000 .note.GNU-stack
+00000000 l    d  .comment	00000000 .comment
+00000000 l    d  .riscv.attributes	00000000 .riscv.attributes
+00000000 g     O .sbss	00000004 MY_BSS
+00000000 g     O .sdata	00000004 MY_DATA
+00000000 g     F .my_function	00000012 MY_FUNCTION
+00000000 g     F .text	00000024 main
+            </code></pre>
+            <code>riscv32-esp-elf-gcc -c -o main.o main.c</code>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="15,16,18" class="language-c">
+main.o:     file format elf32-littleriscv
+
+SYMBOL TABLE:
+00000000 l    df *ABS*	00000000 main.c
+00000000 l    d  .text	00000000 .text
+00000000 l    d  .data	00000000 .data
+00000000 l    d  .bss	00000000 .bss
+00000000 l    d  .sbss.MY_BSS	00000000 .sbss.MY_BSS
+00000000 l    d  .sdata.MY_DATA	00000000 .sdata.MY_DATA
+00000000 l    d  .my_function	00000000 .my_function
+00000000 l    d  .text.main	00000000 .text.main
+00000000 l    d  .note.GNU-stack	00000000 .note.GNU-stack
+00000000 l    d  .comment	00000000 .comment
+00000000 l    d  .riscv.attributes	00000000 .riscv.attributes
+00000000 g     O .sbss.MY_BSS	00000004 MY_BSS
+00000000 g     O .sdata.MY_DATA	00000004 MY_DATA
+00000000 g     F .my_function	00000012 MY_FUNCTION
+00000000 g     F .text.main	00000024 main
+            </code></pre>
+            <code>riscv32-esp-elf-gcc -fdata-sections -ffunction-sections -c -o main.o main.c</code>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>Symbol placement</h2>
+    <div class="container">
+        <div class="col">
+            <code>hello_world</code>
+            <pre><code data-trim data-noescape data-line-numbers="" class="c">
+diff --git a/examples/get-started/hello_world/main/CMakeLists.txt b/examples/get-started/hello_world/main/CMakeLists.txt
+index 28ab405bd662..4dacbbb709bc 100644
+--- a/examples/get-started/hello_world/main/CMakeLists.txt
++++ b/examples/get-started/hello_world/main/CMakeLists.txt
+@@ -1,3 +1,4 @@
+ idf_component_register(SRCS "hello_world_main.c"
+                        PRIV_REQUIRES spi_flash
++                       LDFRAGMENTS linker.lf
+                        INCLUDE_DIRS "")
+diff --git a/examples/get-started/hello_world/main/hello_world_main.c b/examples/get-started/hello_world/main/hello_world_main.c
+index 7010f3ef61c3..3dc76ae3f729 100644
+--- a/examples/get-started/hello_world/main/hello_world_main.c
++++ b/examples/get-started/hello_world/main/hello_world_main.c
+@@ -13,9 +13,15 @@
+ #include "esp_flash.h"
+ #include "esp_system.h"
+ 
++void my_function(void)
++{
++    printf("Hello my function\n");
++}
++
+ void app_main(void)
+ {
+     printf("Hello world!\n");
++    my_function();
+ 
+     /* Print chip information */
+     esp_chip_info_t chip_info;
+
+            </code></pre>
+        </div>
+        <div class="col">
+            <code>linker.lf</code>
+            <pre><code data-trim data-noescape data-line-numbers="" class="bash">
+[mapping:main]
+archive: libmain.a
+entries:
+    hello_world_main:my_function (noflash)
+            </code></pre>
+            <code>sections.ld</code>
+            <pre><code data-trim data-noescape data-line-numbers="" class="bash">
+SECTIONS
+{
+  .flash.text :
+  {
+    *(EXCLUDE_FILE(*libmain.a:hello_world_main.*) .text)
+    *(EXCLUDE_FILE(*libmain.a:hello_world_main.*) .text.*)
+    *(EXCLUDE_FILE(*libmain.a:hello_world_main.*) .literal)
+    *(EXCLUDE_FILE(*libmain.a:hello_world_main.*) .literal.*)
+    *libmain.a:hello_world_main.*(.literal.app_main .text .text.app_main)
+  }
+  .iram0.text :
+  {
+    *libmain.a:hello_world_main.*(.literal.my_function .text.my_function)
+  }
+}
+            </code></pre>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>ldgen workflow</h2>
+    <ul>
+        <li class="fragment">Combine all fragment files</li>
+        <ul>
+        <li class="fragment"><a href="https://github.com/espressif/esp-idf/blob/master/components/esp_system/app.lf">default schemes and mapping fragments in components/esp_system/app.lf</a></li>
+        <li class="fragment"><a href="https://github.com/espressif/esp-idf/blob/master/components/esp_common/common.lf">compiler emitted section fragments in components/esp_common/common.lf</a></li>
+        <li class="fragment"><a href="https://github.com/espressif/esp-idf/blob/master/components/esp_common/soc.lf">sections for in code placements(esp_attr.h) in components/esp_common/soc.lf</a></li>
+        </ul>
+        <li class="fragment">Get symbols from provided archives for symbol placement</li>
+        <li class="fragment">Generate an entity tree with section placements based on mapping fragments</li>
+        <li class="fragment">Generate input section descriptions based on the entity tree and insert them into designated markers (targets) within the sections.ld.in template</li>
+        <li class="fragment">Generated linker scripts in build/esp-idf/esp_system/ld</li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+    Entity Tree with section placements
+
+    <pre><code data-trim data-noescape data-line-numbers="" class="bash">
+-> *
+     (.tcm.text.*, .tcm.text -> tcm_text), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.ext_ram.bss, .ext_ram.bss.* -> dram0_bss), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.gnu.linkonce.b, .sbss2.*, .sbss, .dynbss, .sbss2, .dynsbss, .scommon, .gnu.linkonce.b.*, .sbss.*, .share.mem, .gnu.linkonce.sb.*, .gnu.linkonce.sb2, .gnu.linkonce.sb2.*, .gnu.linkonce.sb -> dram0_bss), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (COMMON -> dram0_bss), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.bss, .bss.* -> dram0_bss), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.dram1.*, .dram1 -> dram0_data), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.data.*, .data -> dram0_data), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.rtc.rodata, .rtc.rodata.* -> rtc_data), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.rtc.data, .rtc.data.* -> rtc_data), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.iram1, .iram1.* -> iram0_text), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.tcm.data.*, .tcm.data -> tcm_data), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.rtc.bss -> rtc_bss), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.literal, .literal.*, .text, .text.* -> flash_text), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.iram.bss, .iram.bss.* -> iram0_bss), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.iram.data, .iram.data.* -> iram0_data), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.srodata, .sdata2.*, .rodata, .rodata.*, .srodata.*, .sdata2 -> flash_rodata), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+     (.rtc.text, .rtc.text.*, .rtc.literal -> rtc_text), basis: NONE, force: False, mutable: False, explicit: True, flags: []
+
+        -> libfreertos.a
+             (.literal, .literal.*, .text, .text.* -> iram0_text), basis: *, force: False, mutable: False, explicit: True, flags: []
+
+                -> heap_idf
+                     (.literal, .literal.*, .text, .text.* -> iram0_text), basis: libfreertos.a, force: False, mutable: False, explicit: True, flags: []
+
+                -> port_common
+                     (.literal, .literal.*, .text, .text.* -> iram0_text), basis: libfreertos.a, force: False, mutable: False, explicit: True, flags: []
+
+                -> port_systick
+                     (.literal, .literal.*, .text, .text.* -> iram0_text), basis: libfreertos.a, force: False, mutable: False, explicit: True, flags: []
+
+                -> tasks
+                     (.literal.prvCheckTaskCanBeScheduledSMP, .literal.prvResetNextTaskUnblockTime, .literal.prvIsYieldRequiredSMP, .literal.prvTaskIsTaskSuspended, .literal.prvSelectHighestPriorityTaskSMP, .literal.prvDeleteTCB, .literal.prvCheckTasksWaitingTermination, .literal.prvAddCurrentTaskToDelayedList, .literal.prvIdleTask, .literal.prvInitialiseNewTask, .literal.prvInitialiseTaskLists, .literal.prvAddNewTaskToReadyList, .literal.eTaskGetState, .literal.vTaskResume, .literal.xTaskResumeFromISR, .literal.vTaskEndScheduler, .literal.vTaskSuspendAll, .literal.xTaskGetTickCount, .literal.xTaskGetTickCountFromISR, .literal.uxTaskGetNumberOfTasks, .literal.xTaskGetHandle, .literal.xTaskAbortDelay, .literal.xTaskIncrementTick, .literal.vTaskSwitchContext, .literal.vTaskPlaceOnEventList, .literal.vTaskPlaceOnUnorderedEventList, .literal.vTaskPlaceOnEventListRestricted, .literal.xTaskRemoveFromEventList, .literal.vTaskRemoveFromUnorderedEventList, .literal.vTaskSetTimeOutState, .literal.vTaskInternalSetTimeOutState, .literal.xTaskCheckForTimeOut, .literal.vTaskMissedYield, .literal.xTaskGetCurrentTaskHandle, .literal.uxTaskPriorityGet, .literal.uxTaskPriorityGetFromISR, .literal.vTaskPrioritySet, .literal.vTaskSuspend, .literal.pcTaskGetName, .literal.xTaskGetStaticBuffers, .literal.vTaskSetThreadLocalStoragePointer, .literal.pvTaskGetThreadLocalStoragePointer, .literal.uxTaskGetStackHighWaterMark2, .literal.uxTaskGetStackHighWaterMark, .literal.xTaskGetSchedulerState, .literal.vTaskDelete, .literal.xTaskDelayUntil, .literal.vTaskDelay, .literal.xTaskResumeAll, .literal.xTaskCatchUpTicks, .literal.xTaskPriorityInherit, .literal.xTaskPriorityDisinherit, .literal.vTaskPriorityDisinheritAfterTimeout, .literal.uxTaskResetEventItemValue, .literal.pvTaskIncrementMutexHeldCount, .literal.ulTaskGenericNotifyTake, .literal.xTaskGenericNotifyWait, .literal.xTaskGenericNotify, .literal.xTaskGenericNotifyFromISR, .literal.vTaskGenericNotifyGiveFromISR, .literal.xTaskGenericNotifyStateClear, .literal.ulTaskGenericNotifyValueClear, .literal.prvTakeKernelLock, .literal.prvReleaseKernelLock, .literal.xTaskIncrementTickOtherCores, .literal.xTaskCreatePinnedToCore, .literal.xTaskCreateStaticPinnedToCore, .literal.prvCreateIdleTasks, .literal.vTaskStartScheduler, .literal.xTaskGetCoreID, .literal.xTaskGetIdleTaskHandleForCore, .literal.xTaskGetIdleTaskHandle, .literal.xTaskGetCurrentTaskHandleForCore, .literal.pxTaskGetStackStart, .literal.prvTaskPriorityRaise, .literal.prvTaskPriorityRestore, .literal.vTaskSetThreadLocalStoragePointerAndDelCallback, .literal.__getreent, .literal.vTaskGetSnapshot, .literal.pvTaskGetCurrentTCBForCore, .text, .text.prvCheckTaskCanBeScheduledSMP, .text.prvSearchForNameWithinSingleList, .text.prvTaskCheckFreeStackSpace, .text.prvResetNextTaskUnblockTime, .text.prvIsYieldRequiredSMP, .text.prvTaskIsTaskSuspended, .text.prvSelectHighestPriorityTaskSMP, .text.prvDeleteTCB, .text.prvCheckTasksWaitingTermination, .text.prvAddCurrentTaskToDelayedList, .text.prvIdleTask, .text.prvInitialiseNewTask, .text.prvInitialiseTaskLists, .text.prvAddNewTaskToReadyList, .text.eTaskGetState, .text.vTaskResume, .text.xTaskResumeFromISR, .text.vTaskEndScheduler, .text.vTaskSuspendAll, .text.xTaskGetTickCount, .text.xTaskGetTickCountFromISR, .text.uxTaskGetNumberOfTasks, .text.xTaskGetHandle, .text.xTaskAbortDelay, .text.xTaskIncrementTick, .text.vTaskSwitchContext, .text.vTaskPlaceOnEventList, .text.vTaskPlaceOnUnorderedEventList, .text.vTaskPlaceOnEventListRestricted, .text.xTaskRemoveFromEventList, .text.vTaskRemoveFromUnorderedEventList, .text.vTaskSetTimeOutState, .text.vTaskInternalSetTimeOutState, .text.xTaskCheckForTimeOut, .text.vTaskMissedYield, .text.xTaskGetCurrentTaskHandle, .text.uxTaskPriorityGet, .text.uxTaskPriorityGetFromISR, .text.vTaskPrioritySet, .text.vTaskSuspend, .text.pcTaskGetName, .text.xTaskGetStaticBuffers, .text.vTaskSetThreadLocalStoragePointer, .text.pvTaskGetThreadLocalStoragePointer, .text.uxTaskGetStackHighWaterMark2, .text.uxTaskGetStackHighWaterMark, .text.xTaskGetSchedulerState, .text.vTaskDelete, .text.xTaskDelayUntil, .text.vTaskDelay, .text.xTaskResumeAll, .text.xTaskCatchUpTicks, .text.xTaskPriorityInherit, .text.xTaskPriorityDisinherit, .text.vTaskPriorityDisinheritAfterTimeout, .text.uxTaskResetEventItemValue, .text.pvTaskIncrementMutexHeldCount, .text.ulTaskGenericNotifyTake, .text.xTaskGenericNotifyWait, .text.xTaskGenericNotify, .text.xTaskGenericNotifyFromISR, .text.vTaskGenericNotifyGiveFromISR, .text.xTaskGenericNotifyStateClear, .text.ulTaskGenericNotifyValueClear, .text.prvTakeKernelLock, .text.prvReleaseKernelLock, .text.xTaskIncrementTickOtherCores, .text.xTaskCreatePinnedToCore, .text.xTaskCreateStaticPinnedToCore, .text.prvCreateIdleTasks, .text.xTimerCreateTimerTask, .text.vTaskStartScheduler, .text.xTaskGetCoreID, .text.xTaskGetIdleTaskHandleForCore, .text.xTaskGetIdleTaskHandle, .text.xTaskGetCurrentTaskHandleForCore, .text.pxTaskGetStackStart, .text.prvTaskPriorityRaise, .text.prvTaskPriorityRestore, .text.vTaskSetThreadLocalStoragePointerAndDelCallback, .text.__getreent, .text.vTaskGetSnapshot, .text.pvTaskGetCurrentTCBForCore -> iram0_text), basis: libfreertos.a, force: True, mutable: False, explicit: False, flags: None
+
+                        -> pxGetTaskListByIndex
+                             (.literal.pxGetTaskListByIndex, .text.pxGetTaskListByIndex -> flash_text), basis: tasks, force: False, mutable: False, explicit: True, flags: []
+
+                        -> uxTaskGetSnapshotAll
+                             (.literal.uxTaskGetSnapshotAll, .text.uxTaskGetSnapshotAll -> flash_text), basis: tasks, force: False, mutable: False, explicit: True, flags: []
+
+                        -> xTaskGetNext
+                             (.literal.xTaskGetNext, .text.xTaskGetNext -> flash_text), basis: tasks, force: False, mutable: False, explicit: True, flags: []
+
+    </code></pre>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>ldgen modification</h2>
+
+    <ul>
+        <li class="fragment">Manage placement of sections within memory regions to group sections that are likely to be modified separately from those that are not.</li>
+        <li class="fragment">Separate the mutable and immutable component archives based on the component source in the build system.</li>
+        <li class="fragment">Mutable archives == project components</li>
+        <li class="fragment">Immutable archives == all other components(esp-idf, component manager)</li>
+        <li class="fragment">Mutable archive names passed to ldgen via <code>--mutable-libraries-file</code></li>
+        <li class="fragment">ldgen explicitly adds mappings for mutable libraries as if there were actual mappings in the linker fragment.</li>
+        <li class="fragment">Placements for mutable archives are marked with mutable flag and placed in a new <code>[mutable]</code> marker added to the sections.ld.in template.</li>
+        <li class="fragment">Placements for immutable archives are kept in existing <code>[mapping]</code> marker.</li>
+        <li class="fragment">The new <code>[mutable]</code> marker is added only to selected output sections.</li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>ldgen modification</h2>
+    <div class="container">
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="" class="bash">
+SECTIONS
+{
+ .iram0.text :
+  {
+    /* Code marked as running out of IRAM */
+    _iram_text_start = ABSOLUTE(.);
+
+    mapping[iram0_text]
+
+  } > iram0_0_seg
+}
+            </code></pre>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="10-12" class="bash">
+SECTIONS
+{
+ .iram0.text :
+  {
+    /* Code marked as running out of IRAM */
+    _iram_text_start = ABSOLUTE(.);
+
+    mapping[iram0_text]
+
+    /* mutable libs begin */
+    mutable[iram0_text]
+    /* mutable libs end */
+
+  } > iram0_0_seg
+}
+            </code></pre>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>ldgen modification</h2>
+
+    <ul>
+        <li class="fragment">Placing mutable archives into a separate marker is not enough.</li>
+        <li class="fragment">Add some padding as a buffer for changes in mutable archives.</li>
+        <li class="fragment">Currently set based on the configuration in the esptool_py component's Kconfig.projbuild.</li>
+        <li class="fragment">components/esp_system/ld/ld.common
+            <pre><code data-trim data-noescape data-line-numbers="" class="c">
+/*
+ * FAST_REFLASHING_PADDING
+ *
+ * Aligns the current location (.) to CONFIG_ESPTOOLPY_FAST_REFLASHING_PADDING.
+ * If more than half of the alignment block is already consumed,
+ * extra padding is applied to skip to the next boundary.
+ */
+#if CONFIG_ESPTOOLPY_FAST_REFLASHING
+#define FAST_REFLASHING_PADDING \
+  . = ALIGN((. + ( \
+    (CONFIG_ESPTOOLPY_FAST_REFLASHING_PADDING - (ALIGN(CONFIG_ESPTOOLPY_FAST_REFLASHING_PADDING) - .)) + \
+    (CONFIG_ESPTOOLPY_FAST_REFLASHING_PADDING / 2) \
+  )), CONFIG_ESPTOOLPY_FAST_REFLASHING_PADDING)
+#else   
+#define FAST_REFLASHING_PADDING
+#endif
+            </code></pre>
+        </li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>ldgen modification</h2>
+    <div class="container">
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="" class="bash">
+SECTIONS
+{
+ .iram0.text :
+  {
+    /* Code marked as running out of IRAM */
+    _iram_text_start = ABSOLUTE(.);
+
+    mapping[iram0_text]
+
+  } > iram0_0_seg
+}
+            </code></pre>
+        </div>
+
+        <div class="col">
+            <pre><code data-trim data-noescape data-line-numbers="10-13" class="bash">
+SECTIONS
+{
+ .iram0.text :
+  {
+    /* Code marked as running out of IRAM */
+    _iram_text_start = ABSOLUTE(.);
+
+    mapping[iram0_text]
+
+    /* mutable libs begin */
+    mutable[iram0_text]
+    FAST_REFLASHING_PADDING;
+    /* mutable libs end */
+
+  } > iram0_0_seg
+}
+            </code></pre>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>ldgen modification</h2>
+
+    <ul>
+        <li class="fragment">Placing mutable archives into a separate marker and adding padding are not enough.</li>
+        <li class="fragment">Optimizations can still combine mutable and immutable input sections, leading to unintended changes in the resulting output section.</li>
+        <li class="fragment">Constant merging - Linker will try to merge input sections that have the MERGE and STRING flags from different libraries (object files) to perform optimizations like tail merging. For example, adding a string literal in a mutable library will also change the addresses of string literals from immutable libraries in such a merged section, causing changes in the generated code when those literals are referenced.</li>
+        <li class="fragment">-fno-merge-constants</li>
+        <li class="fragment">literal pools on Xtensa - As optimization, the linker may merge literal pools from different libraries (object files) to improve the generated code size. This has the same effect as constant merging, and changes in mutable libraries may cause changes in the generated code for immutable libraries. To get larger unchanged continuous blocks in the text output sections for immutable libraries, we need to ensure that the Xtensa literal pools remain close to their references and are not merged.</li>
+        <li class="fragment">-mtext-section-literals</li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>ldgen modification</h2>
+
+    <ul>
+        <li class="fragment">Even with the previously mentioned changes, it is not possible to completely avoid mixing mutable and immutable archives.</li>
+        <li class="fragment">Symbols defined in the linker script, such as <code>_iram_end</code>, which marks the end of a specific section and is used in the heap component to designate reserved memory regions.</li>
+        <li class="fragment">Calling <code>app_main</code> from <code>libfreertos.a</code>.</li>
+        <li class="fragment">Even a minor change in a mutable library could lead to significant changes in immutable libraries.</li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>ldgen modification</h2>
+    <div class="container">
+
+        <div class="col">
+            <code>without modified ldgen</code>
+            <pre><code data-trim data-noescape data-line-numbers="12,13" class="bash">
+fast_reflash.py -f ../hello_world/build/hello_world.bin -t build/hello_world.bin 
+Chip type:          ESP32-D0WD-V3 (revision v3.0)
+Features:           Wi-Fi, BT, Dual Core + LP Core, 240MHz, Vref calibration in eFuse, Coding Scheme None
+Crystal frequency:  40MHz
+Stub flasher running.
+Changing baud rate to 460800...
+Changed.
+block size: 4096 B
+image offset : 0x10000
+from image: ../hello_world/build/hello_world.bin, size: 159744 B, blocks: 39
+to image: build/hello_world.bin, size: 159744 B, blocks: 39
+X==XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+dirty blocks (94.76 %): 37 (148144 B) / 39 (156336 B)
+ 0 at 0x10000
+ 3 at 0x13000
+ 4 at 0x14000
+ 5 at 0x15000
+ 6 at 0x16000
+ 7 at 0x17000
+ 8 at 0x18000
+ 9 at 0x19000
+ 10 at 0x1a000
+ 11 at 0x1b000
+ 12 at 0x1c000
+ 13 at 0x1d000
+ 14 at 0x1e000
+ 15 at 0x1f000
+ 16 at 0x20000
+ 17 at 0x21000
+ 18 at 0x22000
+ 19 at 0x23000
+ 20 at 0x24000
+ 21 at 0x25000
+ 22 at 0x26000
+ 23 at 0x27000
+ 24 at 0x28000
+ 25 at 0x29000
+ 26 at 0x2a000
+ 27 at 0x2b000
+ 28 at 0x2c000
+ 29 at 0x2d000
+ 30 at 0x2e000
+ 31 at 0x2f000
+ 32 at 0x30000
+ 33 at 0x31000
+ 34 at 0x32000
+ 35 at 0x33000
+ 36 at 0x34000
+ 37 at 0x35000
+ 38 at 0x36000
+dirty blocks merged: 2
+ 0x10000 4096 B
+ 0x13000 144048 B
+verifying source image "../hello_world/build/hello_world.bin" in flash ...
+Configuring flash size...
+Flash will be erased from 0x00010000 to 0x00010fff...
+Flash will be erased from 0x00013000 to 0x00036fff...
+Wrote 4096 bytes (1842 compressed) at 0x00010000 in 0.1 seconds (327.6 kbit/s).
+Hash of data verified.
+Wrote 144048 bytes (81260 compressed) at 0x00013000 in 2.5 seconds (456.9 kbit/s).
+Hash of data verified.
+verifying destination image "build/hello_world.bin" in flash ...
+fast reflash successful \o/
+            </code></pre>
+        </div>
+
+        <div class="col">
+            <code>with modified ldgen</code>
+            <pre><code data-trim data-noescape data-line-numbers="12,13" class="bash">
+fast_reflash.py -f ../hello_world/build/hello_world.bin -t build/hello_world.bin 
+Chip type:          ESP32-D0WD-V3 (revision v3.0)
+Features:           Wi-Fi, BT, Dual Core + LP Core, 240MHz, Vref calibration in eFuse, Coding Scheme None
+Crystal frequency:  40MHz
+Stub flasher running.
+Changing baud rate to 460800...
+Changed.
+block size: 4096 B
+image offset : 0x10000
+from image: ../hello_world/build/hello_world.bin, size: 196608 B, blocks: 48
+to image: build/hello_world.bin, size: 196608 B, blocks: 48
+X=======X======================X===============X
+dirty blocks (7.08 %): 4 (13728 B) / 48 (193952 B)
+ 0 at 0x10000
+ 8 at 0x18000
+ 31 at 0x2f000
+ 47 at 0x3f000
+dirty blocks merged: 4
+ 0x10000 4096 B
+ 0x18000 4096 B
+ 0x2f000 4096 B
+ 0x3f000 1440 B
+verifying source image "../hello_world/build/hello_world.bin" in flash ...
+Configuring flash size...
+Flash will be erased from 0x00010000 to 0x00010fff...
+Flash will be erased from 0x00018000 to 0x00018fff...
+Flash will be erased from 0x0002f000 to 0x0002ffff...
+Flash will be erased from 0x0003f000 to 0x0003ffff...
+Wrote 4096 bytes (1934 compressed) at 0x00010000 in 0.1 seconds (307.4 kbit/s).
+Hash of data verified.
+Wrote 4096 bytes (1330 compressed) at 0x00018000 in 0.1 seconds (354.5 kbit/s).
+Hash of data verified.
+Wrote 4096 bytes (2657 compressed) at 0x0002f000 in 0.1 seconds (282.8 kbit/s).
+Hash of data verified.
+Wrote 1440 bytes (55 compressed) at 0x0003f000 in 0.0 seconds (243.3 kbit/s).
+Hash of data verified.
+verifying destination image "build/hello_world.bin" in flash ...
+fast reflash successful \o/
+            </code></pre>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h2>fast_reflash.py</h2>
+    <ul>
+        <li class="fragment"><a href="https://gitlab.espressif.cn:6688/espressif/esp-idf/-/blob/3621442ddf045126eade38187c3441c0bbfe72ba/tools/fast_reflash.py"><code>fast_reflash.py</code></a></li>
+        <li class="fragment">Testing utility only</li>
+        <li class="fragment">Uses new esptool API</li>
+        <li class="fragment">Binary image block-based comparison</li>
+        <li class="fragment"><code>fast_reflash.py --from IMAGE --to IMAGE</code></li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+<h1>demo</h1>
+<video controls width="100%" style="max-width: 600px;">
+  <source src="fast_reflashing.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+</section>
+
+<!-- SLIDE -->
+<section>
+    <h1>Next steps</h1>
+    <ul>
+        <li class="fragment">Merge ldgen changes?</a></li>
+        <li class="fragment">How and where to store bin images from previous build?</a></li>
+        <li class="fragment">New esptool command for fast reflashing. Maybe write-flash-fast?</a></li>
+        <li class="fragment">idf.py integration?</a></li>
+    </ul>
+</section>
+
+<!-- SLIDE -->
+<section>
+<h1>Questions?</h1>
+</section>
+
+<!-- SLIDES END -->
+
+			</div>
+		</div>
+
+		<script src="dist/reveal.js"></script>
+		<script src="plugin/notes/notes.js"></script>
+		<script src="plugin/markdown/markdown.js"></script>
+		<script src="plugin/highlight/highlight.js"></script>
+		<script>
+
+			// More info about initialization & config:
+			// - https://revealjs.com/initialization/
+			// - https://revealjs.com/config/
+			Reveal.initialize({
+				width: 1920,
+                height: 1024,
+                slideNumber: true,
+
+				// Learn about plugins: https://revealjs.com/plugins/
+				plugins: [ RevealMarkdown, RevealHighlight, RevealNotes ]
+			});
+		</script>
+	</body>
+</html>
