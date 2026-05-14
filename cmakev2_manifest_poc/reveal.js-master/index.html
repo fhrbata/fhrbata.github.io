@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+		<title>cmakev2: manifest-driven component register</title>
+
+		<link rel="stylesheet" href="dist/reset.css">
+		<link rel="stylesheet" href="dist/reveal.css">
+		<link rel="stylesheet" href="dist/theme/black.css">
+
+		<!-- Theme used for syntax highlighted code -->
+        <link rel="stylesheet" href="plugin/highlight/xt256.css">
+
+	</head>
+	<style>
+		.reveal {
+			background-image: url('images/logo.png');
+			background-size: 10%;
+			background-position: right 10px top 10px; /* Moves the logo to the top-right */
+			background-repeat: no-repeat;
+			font-size: 2.0rem;
+		}
+
+		.container{
+			display: flex;
+		}
+
+		.col{
+			flex: 1;
+            min-width: 0;
+            justify-content: center;
+		}
+
+        .reveal pre {
+            background-color: #000000;
+            overflow: auto;         /* scroll when content exceeds */
+            background-color: #000;
+            font-size: 1.1rem;
+            line-height: 1.4;
+            padding: 0.8em;
+            box-sizing: border-box;
+            white-space: pre;       /* no wrapping; change to pre-wrap if you want wrap */
+        }
+
+        /* Optional: styling the code inside */
+        .reveal pre code {
+            max-height: 600px;
+            background-color: #000000;
+            display: block;
+            line-height: inherit;
+        }
+
+        /* Inline <code> (e.g. in list items, paragraphs) — keep the body
+           font so the size matches surrounding text, and use a faint
+           background pill instead of a monospace font as the "this is
+           code" visual cue. Block <pre><code> samples keep their
+           monospace styling (selector excludes them). */
+        .reveal :not(pre) > code {
+            font-family: inherit;
+            background-color: rgba(255, 255, 255, 0.10);
+            padding: 0.05em 0.35em;
+            border-radius: 0.25em;
+        }
+
+        .reveal table {
+            font-size: 1.4rem;
+            margin: 0 auto;
+        }
+        .reveal table th, .reveal table td {
+            padding: 0.4em 0.8em;
+            border: 1px solid #555;
+        }
+	</style>
+	<body>
+		<div class="reveal">
+			<div class="slides">
+
+<!-- SLIDES START -->
+
+<!-- SLIDE: title -->
+<section>
+    <h1>manifest-driven component register</h1>
+    <h3>for cmakev2?</h3>
+    <h6>May 2026</h6>
+    <aside class="notes">
+        Two proof-of-concept implementations side-by-side. Goal of the talk:
+        agree on the feature and decide which implementation direction to take.
+        Scope is cmakev2 today; nothing about the schema prevents extending the
+        feature to cmakev1 later if there's appetite for it.
+    </aside>
+</section>
+
+<!-- SLIDE: overview -->
+<section>
+    <h2>Overview</h2>
+    <ul>
+        <li class="fragment">Why? — the three-file problem (IDF-15485)</li>
+        <li class="fragment">End goal — a component defined purely in manifest</li>
+        <li class="fragment">New <code>register:</code> section in manifest</li>
+        <li class="fragment">Kconfig in manifest</li>
+        <li class="fragment">Dependencies — registry, local, plain component dependencies</li>
+        <li class="fragment">Two implementations &amp; comparison</li>
+        <li class="fragment">Demo</li>
+    </ul>
+</section>
+
+<!-- SLIDE: problem -->
+<section>
+    <h2>The problem (IDF-15485)</h2>
+    <ul>
+        <li class="fragment">Every ESP-IDF component carries <b>three</b> hand-written configuration files, each in its own Domain-Specific Language (DSL)</li>
+        <li class="fragment"><code>CMakeLists.txt</code> &mdash; CMake DSL, <i>imperative</i> (describes how, step by step)</li>
+        <li class="fragment"><code>idf_component.yml</code> &mdash; YAML manifest, <i>declarative</i> (describes what you want, not how to get there)</li>
+        <li class="fragment"><code>Kconfig</code> / <code>Kconfig.projbuild</code> &mdash; Kconfig DSL, for build and compile-time configuration</li>
+        <li class="fragment">Three syntaxes, three responsibilities, all describing <i>the same component</i></li>
+    </ul>
+</section>
+
+<!-- SLIDE: three files visual -->
+<section>
+    <h2>Three files, three languages</h2>
+    <div class="container">
+        <div class="col">
+            <pre><code data-trim data-noescape class="language-cmake">
+# CMakeLists.txt
+idf_component_register(
+    SRCS "data_logger.c"
+         "logger_uart.c"
+    INCLUDE_DIRS "include"
+    REQUIRES log
+    PRIV_REQUIRES esp_timer)
+            </code></pre>
+        </div>
+        <div class="col">
+            <pre><code data-trim data-noescape class="language-yaml">
+# idf_component.yml
+version: "1.0.0"
+description: "Data logger"
+dependencies:
+  idf: ">=5.3"
+  espressif/cmp: "^3.3.3"
+            </code></pre>
+        </div>
+        <div class="col">
+            <pre><code data-trim data-noescape class="language-bash">
+# Kconfig
+menu "data_logger"
+    config DATA_LOGGER_ENABLE
+        bool "Enable data logger"
+        default y
+    config DATA_LOGGER_BUFFER_SIZE
+        int "Buffer size"
+        default 1024
+        range 128 8192
+endmenu
+            </code></pre>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE: friction -->
+<section>
+    <h2>What hurts</h2>
+    <ul>
+        <li class="fragment"><b>Onboarding</b> &mdash; new developers must learn three DSLs to publish their first component</li>
+        <li class="fragment"><b>IDE support</b> &mdash; CMake is not IDE-friendly: hard for tools like CLion, VS Code, or Eclipse to parse and modify reliably</li>
+        <li class="fragment"><b>Declarative vs imperative gap</b> &mdash; <code>idf_component.yml</code> and <code>CMakeLists.txt</code> both describe "what the component is", but in two different paradigms</li>
+    </ul>
+</section>
+
+<!-- SLIDE: registry observation -->
+<section>
+    <h2>What components actually do</h2>
+    <ul>
+        <li class="fragment">Most components use only a small subset of CMake features</li>
+        <li class="fragment">List source files</li>
+        <li class="fragment">Declare include directories</li>
+        <li class="fragment">Specify component dependencies</li>
+        <li class="fragment">Maybe embed a file or two</li>
+        <li class="fragment">A declarative YAML schema can cover this <i>fully</i></li>
+        <li class="fragment">For the common case, all of the above can be expressed in <code>idf_component.yml</code> alone</li>
+    </ul>
+</section>
+
+<!-- SLIDE: vision -->
+<section>
+    <h2>The vision</h2>
+    <ul>
+        <li class="fragment">One YAML manifest per component — <code>idf_component.yml</code></li>
+        <li class="fragment"><code>CMakeLists.txt</code> shrinks to a one-line stub:
+            <pre><code data-trim data-noescape class="language-cmake">
+idf_component_register_from_manifest()
+            </code></pre>
+        </li>
+        <li class="fragment">Kconfig fully expressible inside the same YAML</li>
+        <li class="fragment">Schema-validated, IDE-friendly, human-readable</li>
+        <li class="fragment"><b>Additive</b>: existing components keep working unchanged; the manifest opt-in covers the common case</li>
+    </ul>
+</section>
+
+<!-- SLIDE: end goal -->
+<section>
+    <h2>End goal: component defined purely in YAML</h2>
+    <pre><code data-trim data-noescape data-line-numbers="1-6|8-14|16-28|30-36" class="language-yaml">
+# Dependencies (registry, local, plain component dependencies)
+dependencies:
+  idf: ">=5.3"
+  espressif/esp_timer: "^1.0.0"   # registry, fetched
+  log:                            # component dependency, no fetch
+  driver:                         # component dependency, no fetch
+
+# Everything idf_component_register(...) would have taken
+register:
+  sources:
+    - data_logger.c
+    - logger_uart.c
+  include_dirs:
+    - include
+
+  # Kconfig options, inline
+  kconfig:
+    - config: DATA_LOGGER_ENABLE
+      type: bool
+      prompt: "Enable data logger"
+      default: y
+    - config: DATA_LOGGER_BUFFER_SIZE
+      type: int
+      prompt: "Buffer size (bytes)"
+      default: 1024
+      range:
+        - 128
+        - 8192
+
+# SBOM metadata, consumed by esp-idf-sbom
+sbom:
+  name: 'data_logger'
+  version: '1.0.0'
+  supplier: 'Organization: Espressif Systems (Shanghai) CO LTD'
+  originator: 'Organization: Espressif Systems (Shanghai) CO LTD'
+  description: 'Captures sensor values to a circular in-memory buffer'
+    </code></pre>
+    <aside class="notes">
+        Three files collapsed into one. CMakeLists.txt is just the stub.
+        sbom: namespace is already supported by esp-idf-sbom — included to
+        show idf_component.yml's existing tool-namespace pattern.
+    </aside>
+</section>
+
+<!-- SLIDE: before/after -->
+<section>
+    <h2>Before / After</h2>
+    <div class="container">
+
+        <div class="col">
+            <p><b>Before</b>: 3 files, 3 languages</p>
+            <pre><code data-trim data-noescape class="language-cmake">
+# CMakeLists.txt
+idf_component_register(
+    SRCS "data_logger.c"
+         "logger_uart.c"
+    INCLUDE_DIRS "include"
+    REQUIRES log
+    PRIV_REQUIRES esp_timer)
+            </code></pre>
+            <pre><code data-trim data-noescape class="language-bash">
+# Kconfig
+menu "data_logger"
+    config DATA_LOGGER_ENABLE
+        bool "Enable data logger"
+        default y
+endmenu
+            </code></pre>
+            <pre><code data-trim data-noescape class="language-yaml">
+# idf_component.yml
+dependencies:
+  idf: ">=5.3"
+            </code></pre>
+        </div>
+
+        <div class="col">
+            <p><b>After</b>: 1 manifest + 1-line stub</p>
+            <pre><code data-trim data-noescape class="language-yaml">
+# idf_component.yml
+dependencies:
+  idf: ">=5.3"
+  log:
+  esp_timer:
+
+register:
+  sources: [data_logger.c, logger_uart.c]
+  include_dirs: [include]
+  kconfig:
+    - config: DATA_LOGGER_ENABLE
+      type: bool
+      prompt: "Enable data logger"
+      default: y
+            </code></pre>
+            <pre><code data-trim data-noescape class="language-cmake">
+# CMakeLists.txt
+idf_component_register_from_manifest()
+            </code></pre>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE: register section -->
+<section>
+    <h2>The <code>register:</code> section</h2>
+    <ul>
+        <li class="fragment">Each <code>idf_component_register(...)</code> argument maps 1:1 to a YAML key (snake_case)</li>
+        <li class="fragment"><code>sources</code>, <code>src_dirs</code>, <code>exclude_srcs</code></li>
+        <li class="fragment"><code>include_dirs</code>, <code>priv_include_dirs</code></li>
+        <li class="fragment"><code>embed_files</code>, <code>embed_txtfiles</code></li>
+        <li class="fragment"><code>ldfragments</code>, <code>required_idf_targets</code></li>
+        <li class="fragment"><code>whole_archive</code> (boolean flag)</li>
+        <li class="fragment">Two more sub-keys: <code>kconfig:</code> and <code>kconfig_projbuild:</code></li>
+    </ul>
+</section>
+
+<!-- SLIDE: kconfig grammar -->
+<section>
+    <h2>Kconfig in YAML</h2>
+    <ul>
+        <li class="fragment">Grammar covers <i>every</i> construct <code>esp-idf-kconfig</code> supports</li>
+        <li class="fragment">Entry kinds: <code>config</code>, <code>menuconfig</code>, <code>choice</code>, <code>menu</code>, <code>if/then</code>, <code>comment</code></li>
+        <li class="fragment">Sources: <code>source</code>, <code>rsource</code>, <code>osource</code>, <code>orsource</code></li>
+        <li class="fragment">Types: <code>bool</code>, <code>int</code>, <code>hex</code>, <code>string</code></li>
+        <li class="fragment">Polymorphic attributes (scalar or list-of-clauses with optional <code>if</code>):
+            <code>prompt</code>, <code>default</code>, <code>range</code>, <code>select</code>, <code>imply</code></li>
+        <li class="fragment"><code>depends_on</code>: scalar or list (no <code>if</code> tail; Kconfig forbids it)</li>
+        <li class="fragment"><code>visible_if</code>: only on <code>menu</code> (the only place Kconfig accepts it)</li>
+    </ul>
+</section>
+
+<!-- SLIDE: kconfig example simple -->
+<section>
+    <h2>Kconfig example: simple config &amp; menuconfig</h2>
+    <pre><code data-trim data-noescape data-line-numbers="1-8|10-19" class="language-yaml">
+# Master switch.
+- config: DATA_LOGGER_ENABLE
+  type: bool
+  prompt: "Enable data logger"
+  default: y
+  help: |
+    When enabled, the data logger captures sensor values to a
+    circular in-memory buffer.
+
+# menuconfig: nested options, body auto-wrapped in `if`.
+- menuconfig: DATA_LOGGER_DEBUG
+  type: bool
+  prompt: "Debug options"
+  default: n
+  depends_on: "DATA_LOGGER_ENABLE"
+  body:
+    - config: DATA_LOGGER_DEBUG_VERBOSE
+      type: bool
+      prompt: "Verbose debug output"
+    </code></pre>
+</section>
+
+<!-- SLIDE: kconfig polymorphic -->
+<section>
+    <h2>Kconfig example: polymorphic <code>default</code> / <code>range</code></h2>
+    <pre><code data-trim data-noescape data-line-numbers="1-12|14-24" class="language-yaml">
+# int with list-form default and range, target-aware.
+- config: DATA_LOGGER_BUFFER_SIZE
+  type: int
+  prompt: "Buffer size (bytes)"
+  default:
+    - default: 4096
+      if: "IDF_TARGET_LINUX"
+    - default: 1024
+  range:
+    - range: [256, 65536]
+      if: "IDF_TARGET_LINUX"
+    - range: [128, 8192]
+
+# choice: pick exactly one backend.
+- choice: DATA_LOGGER_BACKEND
+  prompt: "Logger backend"
+  default: DATA_LOGGER_BACKEND_UART
+  options:
+    - config: DATA_LOGGER_BACKEND_UART
+      type: bool
+      prompt: "UART"
+    - config: DATA_LOGGER_BACKEND_FILE
+      type: bool
+      prompt: "File on SPI flash"
+    </code></pre>
+</section>
+
+<!-- SLIDE: kconfig if/then -->
+<section>
+    <h2>Kconfig example: <code>if/then</code>, <code>comment</code>, <code>rsource</code></h2>
+    <pre><code data-trim data-noescape data-line-numbers="1-12|14-16|18-19" class="language-yaml">
+# if/then block: visible only when the network backend is selected.
+- if: "DATA_LOGGER_BACKEND_NETWORK"
+  then:
+    - config: DATA_LOGGER_NET_HOST
+      type: string
+      prompt: "Server hostname"
+      default: "127.0.0.1"
+    - config: DATA_LOGGER_NET_TLS
+      type: bool
+      prompt: "Use TLS"
+      default: n
+      select: MBEDTLS_CERTIFICATE_BUNDLE
+
+# Conditional comment.
+- comment: "Network backend selected; configure server settings above."
+  if: "DATA_LOGGER_BACKEND_NETWORK"
+
+# Pull in an existing hand-written Kconfig fragment, relative to component.
+- rsource: "Kconfig.platform"
+    </code></pre>
+</section>
+
+<!-- SLIDE: dependencies -->
+<section>
+    <h2>Dependencies — registry, local, plain component</h2>
+    <p>The same <code>dependencies:</code> block carries everything; the <i>value</i> tells the manager which:</p>
+    <table>
+        <tr><th>Form</th><th>Existing manager term</th><th>Meaning</th></tr>
+        <tr><td><code>foo: "^1.0"</code></td><td>ESP Component Registry dependency (auto-prefixed)</td><td>Bare name + version → auto-prefixed to <code>espressif/foo</code>, fetched from registry</td></tr>
+        <tr><td><code>ns/foo: "^1.0"</code></td><td>ESP Component Registry dependency</td><td>Namespaced + version → fetched from registry as <code>ns/foo</code></td></tr>
+        <tr><td><code>foo: { path: ../path }</code></td><td>Local Directory dependency</td><td>Mount a local directory</td></tr>
+        <tr><td><code>foo: { git: &lt;url&gt;, version: &lt;ref&gt; }</code></td><td>Git dependency</td><td>Clone a git repo</td></tr>
+        <tr><td><code>foo:</code> <i>(no value)</i></td><td><b>Component dependency</b> <i>(new)</i></td><td>Look up <code>foo</code> in the build system's already-discovered components. No fetch, no version solve. Errors on no match.</td></tr>
+    </table>
+    <p class="fragment">The plain component-dependency form is what lets local + built-in IDF deps live alongside registry deps in one block.</p>
+</section>
+
+<!-- SLIDE: two implementations -->
+<section>
+    <h2>Two implementations</h2>
+    <p>Same user-visible feature, two architectures. Both ship as drafts; the talk is to pick one.</p>
+    <div class="container">
+        <div class="col">
+            <h4>Approach 1: build-system-driven</h4>
+            <ul>
+                <li>esp-idf <a href="https://gitlab.espressif.cn:6688/espressif/esp-idf/-/merge_requests/48143">!48143</a></li>
+                <li>~1500-line <code>tools/cmakev2/manifestgen.py</code></li>
+                <li>esp-idf side generates CMake and Kconfig artifacts</li>
+                <li>Component manager unchanged</li>
+                <li>Works with <code>IDF_COMPONENT_MANAGER=0</code></li>
+            </ul>
+        </div>
+        <div class="col">
+            <h4>Approach 2: manager-driven</h4>
+            <ul>
+                <li>esp-idf <a href="https://gitlab.espressif.cn:6688/espressif/esp-idf/-/merge_requests/48540">!48540</a></li>
+                <li>idf-component-manager <a href="https://gitlab.espressif.cn:6688/espressif/idf-component-manager/-/merge_requests/641">!641</a></li>
+                <li>Generator moves into the manager</li>
+                <li>esp-idf side: stub + Kconfig wire-up only</li>
+                <li>Adds plain component dependencies in <code>dependencies:</code></li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+<!-- SLIDE: comparison table -->
+<section>
+    <h2>Comparison</h2>
+    <table>
+        <tr>
+            <th></th>
+            <th>Approach 1 (!48143)</th>
+            <th>Approach 2 (!48540 + !641)</th>
+        </tr>
+        <tr>
+            <td>Schema owner</td>
+            <td><code>tools/cmakev2/manifestgen.py</code></td>
+            <td><code>idf_component_manager/manifest_generator.py</code></td>
+        </tr>
+        <tr>
+            <td>New code in esp-idf</td>
+            <td>~1500 lines Python + tests</td>
+            <td>~95 lines CMake (stub + wire-up)</td>
+        </tr>
+        <tr>
+            <td>Works with <code>IDF_COMPONENT_MANAGER=0</code></td>
+            <td>yes</td>
+            <td>no — manager package required</td>
+        </tr>
+        <tr>
+            <td>Single owner for <code>idf_component.yml</code> semantics</td>
+            <td>no (manager owns deps, build system owns <code>register:</code>)</td>
+            <td>yes</td>
+        </tr>
+        <tr>
+            <td><code>register.requires:</code> / <code>register.priv_requires:</code></td>
+            <td>in schema</td>
+            <td>not in schema — deps unified under <code>dependencies:</code></td>
+        </tr>
+        <tr>
+            <td>Plain component dependencies (<code>foo:</code> with no value)</td>
+            <td>not available</td>
+            <td>available — replaces <code>register.requires:</code> for local / IDF deps</td>
+        </tr>
+    </table>
+</section>
+
+<!-- SLIDE: how approach 2 wires deps -->
+<section>
+    <h2>Approach 2: plain component dependency flow</h2>
+    <ol>
+        <li class="fragment">Build system writes <code>local_components_list.temp.yml</code> with every discovered component (name, path, source category)</li>
+        <li class="fragment">Manager loads the manifest; sees <code>log:</code> with no value</li>
+        <li class="fragment">Looks <code>log</code> up in the discovered list — finds it as <code>idf_components</code></li>
+        <li class="fragment">Rewrites the entry in-memory to <code>DependencyItem(path=&lt;log's path&gt;)</code></li>
+        <li class="fragment">The synthetic <code>path:</code> dep flows through <code>LocalSource</code>: no version solve, no download</li>
+        <li class="fragment">Post-resolution dedup keeps <code>log</code> registered as <code>idf_components</code> (no reclassification)</li>
+        <li class="fragment"><code>inject_requirements</code> emits <code>MANAGED_PRIV_REQUIRES "log"</code>; v2 shim wires it into the parent's <code>PRIV_REQUIRES</code></li>
+        <li class="fragment">No match → fatal error with the list of available local components (typos surface early)</li>
+    </ol>
+</section>
+
+<!-- SLIDE: shared semantics -->
+<section>
+    <h2>Shared semantics (both approaches)</h2>
+    <ul>
+        <li class="fragment"><b>Stub-mode requirement</b>: if <code>register:</code> declares any <code>idf_component_register</code>-arg key (or, in Approach 2, <code>dependencies:</code> carries a plain component dependency), <code>CMakeLists.txt</code> must be the one-line stub — no clash with a hand-written <code>idf_component_register(...)</code></li>
+        <li class="fragment"><b>Conflict matrix</b>: <code>register.kconfig:</code> vs source-tree <code>Kconfig</code>, <code>register.kconfig_projbuild:</code> vs source-tree <code>Kconfig.projbuild</code> — errors</li>
+        <li class="fragment"><b>Error reporting</b>: every diagnostic carries <code>idf_component.yml:LINE</code>; generated Kconfig has source-comment markers (<code># idf_component.yml: register.kconfig[2].config.FOO</code>) so <code>kconfgen</code> errors trace back</li>
+        <li class="fragment"><b>Backward compat</b>: components without a <code>register:</code> section continue to work exactly as today</li>
+    </ul>
+</section>
+
+<!-- SLIDE: demo -->
+<section>
+    <h1>Demo</h1>
+    <aside class="notes">
+        manifest_hello at ~/work/testing/manifest_hello: main/ + components/greeter/,
+        registry dep on example/cmp, plain component deps on greeter and log,
+        greeter declares its own Kconfig in idf_component.yml, both CMakeLists.txt
+        files are one-line stubs. Walk through: cat the manifests, idf.py build,
+        inspect build/manifest_components/, grep MANAGED_PRIV_REQUIRES in
+        build/component_requires.main.temp.cmake.
+    </aside>
+</section>
+
+<!-- SLIDE: questions -->
+<section>
+    <h1>Questions?</h1>
+</section>
+
+<!-- SLIDES END -->
+
+			</div>
+		</div>
+
+		<script src="dist/reveal.js"></script>
+		<script src="plugin/notes/notes.js"></script>
+		<script src="plugin/markdown/markdown.js"></script>
+		<script src="plugin/highlight/highlight.js"></script>
+		<script>
+
+			// More info about initialization & config:
+			// - https://revealjs.com/initialization/
+			// - https://revealjs.com/config/
+			Reveal.initialize({
+				width: 1920,
+                height: 1024,
+                slideNumber: true,
+
+				// Learn about plugins: https://revealjs.com/plugins/
+				plugins: [ RevealMarkdown, RevealHighlight, RevealNotes ]
+			});
+		</script>
+	</body>
+</html>
