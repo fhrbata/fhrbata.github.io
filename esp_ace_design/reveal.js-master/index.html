@@ -227,15 +227,25 @@
 		<li class="fragment">what we need and cobra does not give:
 			<ul>
 				<li class="fragment">one declaration that also defines config keys, environment variables and events</li>
-				<li class="fragment">completion of <b>values</b>, not just names</li>
+				<li class="fragment">allowed values written once, on the option: the parser checks them,
+					completion offers them, the help lists them</li>
 				<li class="fragment">a model package that imports only the standard library</li>
 				<li class="fragment">a mistake in a command definition is found at startup, not by a user</li>
 			</ul>
 		</li>
 	</ul>
 	<aside class="notes">
-		The cobra removal is one commit: "Dispatch through the in-house
-		parser, drop cobra". Say that we removed it on purpose. It was not a decision made for a new project.
+		cobra came with the first scaffold (856b75a7). We used it, then removed
+		it on purpose, in one commit: "dispatch through the in-house parser,
+		drop cobra" (8af3113c).
+
+		If somebody says cobra completes values: it does, with
+		RegisterFlagCompletionFunc and ValidArgsFunction, registered apart from
+		the flag. What cobra has no place for is the list of allowed values.
+		pflag has no such field, so the check, the completion and the help are
+		three pieces of code. In ace all three read Choices on the row:
+		Opt.Set checks it, completion offers it, and the help card prints
+		"(human | json | ndjson)".
 	</aside>
 </section>
 
@@ -244,38 +254,45 @@
 	<h2>One <code>Def</code> is the whole command</h2>
 	<div class="container">
 		<div class="col">
-			<pre><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|2|3|4|5|6|7|8|9|10|11|12|13" class="go">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|2|3|4|6|7|8|9|10|11|12|13|14|15|16" class="go">
 type Def struct {
     Name     string
     Summary  string
-    Doc      Doc          // documentation
-    Opts     []Opt        // command line
-    Configs  []ConfigDef  // config keys
-    Envs     []EnvDef     // env variables
-    Needs    []Need       // preconditions
-    Args     []Arg        // positionals
-    Events   []EventDef   // what it may report
-    Controls []ControlDef // what a peer may ask
+    Doc      Doc
+    ...
+    Needs    []Need
+    Opts     []Opt
+    Configs  []ConfigDef
+    Envs     []EnvDef
+    Events   []EventDef
+    Controls []ControlDef
+    Args     []Arg
+    Validate func(d *Def, args []string) error
+    Complete func(d *Def, args []string, toComplete string) []Candidate
     Run      func(c Ctx) error
-    Subs     []*Def       // subcommands
+    Subs     []*Def
 }
 			</code></pre>
 		</div>
 		<div class="col">
 			<ul class="tight small">
 				<li class="fragment" data-fragment-index="1">the word typed on the command line</li>
-				<li class="fragment" data-fragment-index="2">the one line shown in the parent's help</li>
-				<li class="fragment" data-fragment-index="3">the manual printed by <code>-h</code> and <code>--help</code></li>
-				<li class="fragment" data-fragment-index="4">flags, with type, default and allowed values</li>
-				<li class="fragment" data-fragment-index="5">the config keys this command defines</li>
-				<li class="fragment" data-fragment-index="6">the environment variables it reads</li>
-				<li class="fragment" data-fragment-index="7">what must be true before it runs</li>
-				<li class="fragment" data-fragment-index="8">positional arguments, each with its own completion</li>
-				<li class="fragment" data-fragment-index="9">events it may send while working</li>
-				<li class="fragment" data-fragment-index="10">requests a connected program may send it</li>
-				<li class="fragment" data-fragment-index="11">the function that runs the command</li>
-				<li class="fragment" data-fragment-index="12">its subcommands. <code>ace config</code> does no
+				<li class="fragment" data-fragment-index="2">the one line shown in the parent's help and in completion</li>
+				<li class="fragment" data-fragment-index="3">the manual, printed by <code>--help</code> and
+					<code>ace help</code>. <code>-h</code> prints a short card.</li>
+				<li class="fragment" data-fragment-index="4">what must be true before it runs</li>
+				<li class="fragment" data-fragment-index="5">flags, with type, default and allowed values</li>
+				<li class="fragment" data-fragment-index="6">the config keys this command defines</li>
+				<li class="fragment" data-fragment-index="7">the environment variables it reads</li>
+				<li class="fragment" data-fragment-index="8">events it may send while working</li>
+				<li class="fragment" data-fragment-index="9">requests a connected program may send it</li>
+				<li class="fragment" data-fragment-index="10">positional arguments, each with its own completion</li>
+				<li class="fragment" data-fragment-index="11">a check of the arguments, after parsing</li>
+				<li class="fragment" data-fragment-index="12">extra names for the subcommand position. The root
+					offers <code>ace-&lt;verb&gt;</code> programs this way.</li>
+				<li class="fragment" data-fragment-index="13">the function that runs the command</li>
+				<li class="fragment" data-fragment-index="14">its subcommands. <code>ace config</code> does no
 					work itself; it only groups the commands below it.</li>
 			</ul>
 		</div>
@@ -284,6 +301,14 @@ type Def struct {
 		Everything a user can see or set is in one struct literal. No init() that
 		registers a flag somewhere else, no second place a config key can be
 		defined.
+
+		The struct is internal/command/command.go:783-925. The "..." hides five
+		fields: Parent (Init sets it), Hidden (not listed, like git's plumbing
+		commands; ace idf is hidden), Passthrough (the rest of the line goes to
+		another program), OwnsStdout and HumanDefault (what stdout holds).
+
+		No command defines an environment variable today. The size example on
+		the next slide shows how one would.
 	</aside>
 </section>
 
@@ -382,20 +407,28 @@ var sizeCmd = &amp;cmd.Def{
 	<h2>The tree is fixed, and every part reads it</h2>
 	<div class="container">
 		<div class="col">
-			<pre><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-10|13" class="go">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|1-17|21" class="go">
 var aceCmd = cmd.Def{
-    Name: "ace",
+    Name:    "ace",
+    ...
     Subs: []*cmd.Def{
         helpCmd,
         buildCmd,
+        completionCmd,
         configCmd,
+        idfCmd,
         initCmd,
+        profileCmd,
         statusCmd,
+        switchCmd,
+        targetCmd,
+        workspaceCmd,
     },
 }
 
-func main() {
+func dispatch() int {
+    ...
     cmd.Init(&amp;aceCmd)
     ...
 }
@@ -404,7 +437,8 @@ func main() {
 		<div class="col">
 			<ul class="tight small">
 				<li class="fragment" data-fragment-index="1">the whole command tree is written in
-					code, one <code>Def</code> per command</li>
+					code, one <code>Def</code> per command. The root has 11 subcommands;
+					<code>idf</code> is hidden.</li>
 				<li class="fragment" data-fragment-index="2">the tree is built here, once, when
 					the program starts. <code>Init</code> sets every parent link and checks the
 					whole tree.</li>
@@ -421,6 +455,9 @@ func main() {
 		</div>
 	</div>
 	<aside class="notes">
+		cmd/ace/main.go:75 is the root, main.go:323-335 its subcommands, and
+		main.go:824 the Init call, the first step of dispatch().
+
 		The standard-library-only rule is what makes the rest possible. The
 		model must not know what a config store or an emitter is, or nothing
 		else could import it.
@@ -431,13 +468,80 @@ func main() {
 	</aside>
 </section>
 
+<!-- SLIDE: one run -->
+<section>
+	<h2>One run, step by step</h2>
+	<div class="container">
+		<div class="col">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|2|3|4-7|8|9-11|12|13-15|16-18" class="go">
+// cmd/ace/main.go, dispatch()
+cmd.Init(&amp;aceCmd)
+call, err := cli.Parse(&amp;aceCmd, os.Args[1:])
+if err = call.ApplyEnv(); !decided { ... }
+projectRoot, err = findProject()
+if err = config.Init(&amp;aceCmd, projectRoot, ...); !decided { ... }
+if err = call.ApplyConfig(config.Get()); !decided { ... }
+code, err, dispatched := call.RunExternal()
+f.add(ide.InitEmitter(setup))
+slog.SetDefault(slog.New(ide.LogEvents(logLevel)))
+f.add(emitter.Started())
+if err := f.first(); err != nil { ... }
+if (flagHelpShort || flagHelpLong) &amp;&amp; !call.Completing() { ... }
+if flagVersion &amp;&amp; !call.Completing() { ... }
+if call.Complete() { ... }
+ctx, stop := process.SignalContext()
+release, err := checkNeeds(ctx, emitter, call.Cmd())
+return emitter.Finished(call.Run(ctx, projectRoot))
+			</code></pre>
+		</div>
+		<div class="col">
+			<ul class="tight small">
+				<li class="fragment" data-fragment-index="1">the tree is built and checked</li>
+				<li class="fragment" data-fragment-index="2">the words are matched to the tree. A wrong
+					line is a usage error: exit code 2.</li>
+				<li class="fragment" data-fragment-index="3">the parser sets the flags. Environment
+					variables fill the options still unset. Then the project is found, the
+					configuration is read, and it fills the rest.</li>
+				<li class="fragment" data-fragment-index="4">a verb that is not built in runs an
+					<code>ace-&lt;verb&gt;</code> program from <code>PATH</code>, if
+					<code>core.allow-pathcmds</code> allows it</li>
+				<li class="fragment" data-fragment-index="5">the emitter is chosen, the logger goes
+					through it, and the run starts</li>
+				<li class="fragment" data-fragment-index="6">an error from any step above is printed
+					only now, in the chosen format. <code>ace --format json bogus</code> prints a
+					JSON error.</li>
+				<li class="fragment" data-fragment-index="7"><code>-h</code>, <code>--help</code>,
+					<code>--version</code> and TAB answer here and stop. The needs are not
+					checked yet, so help works with no ESP-IDF.</li>
+				<li class="fragment" data-fragment-index="8">Ctrl-C handling starts, the needs are
+					checked, and the command runs. <code>Finished</code> returns the exit code.</li>
+			</ul>
+		</div>
+	</div>
+	<aside class="notes">
+		cmd/ace/main.go:810-1062. Every line on the left is a real line of
+		dispatch(), in order; the bodies are cut to "...".
+
+		Every step runs even after an error. The error is recorded with
+		f.add and printed at f.first, once the format is known (the comment
+		at main.go:826). That is why --format json also applies to a usage error:
+		ace --format json bogus prints the JSON envelope with exit code 2.
+
+		The gates for -h, --help, --version and TAB come before checkNeeds on
+		purpose (main.go:1049): a card, a version and a TAB work on a machine
+		with no ESP-IDF. Signal handling starts after the gates
+		(main.go:1038), so a Ctrl-C during help ends ace at once.
+	</aside>
+</section>
+
 <!-- SLIDE: inherited options -->
 <section>
 	<h2>Options are inherited down the tree</h2>
 	<div class="container">
 		<div class="col">
 			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-2|4-5|7" class="bash">
+				data-line-numbers="|1-2|4-5|7" class="bash">
 $ ace build -v                       # watch the compiler output
 $ ace build --format json            # machine output from a build
 
@@ -452,9 +556,10 @@ $ ace workspace list -h
 usage: ace workspace list [&lt;options&gt;]
 
 Options inherited from ace
-    -c &lt;key=value&gt;      override a configuration key for this run
-    --format &lt;format&gt;   output rendering (human | json | ndjson)
-    -q, --quiet         suppress stderr logs
+    ...
+    --format &lt;format&gt;     output rendering (human | json | ndjson)
+    -h                    show the help card
+    --help                show the full manual
     ...
 			</code></pre>
 		</div>
@@ -482,6 +587,9 @@ Options inherited from ace
 		The -v example is the one people use every day. You want the compiler
 		output, and -v is declared on the root, but you type it where the
 		command is.
+
+		The card is real and cut: it has eleven inherited options, and the
+		three shown are consecutive.
 	</aside>
 </section>
 
@@ -491,18 +599,19 @@ Options inherited from ace
 	<div class="container">
 		<div class="col">
 			<pre><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-4|6-8|9,11|10|2" class="go">
+				data-line-numbers="|2-5|7-9|10,12|11|3" class="go">
+// cmd/ace/build.go
 Needs: []cmd.Need{
     cmd.NeedIDF,
     cmd.NeedWorkspaceLocked,
-}
+},
 
 NeedIDF              an activated ESP-IDF
 NeedIDFProject       a project at or above here
-NeedWorkspace        a workspace to act on
-NeedWorkspaceLocked  held for the whole run
-NeedBuild            and the build actually run
-NeedBuildLocked      both, for the whole run
+NeedWorkspace        a workspace whose tree matches
+NeedWorkspaceLocked  a workspace, held for the run
+NeedBuild            a workspace, built first
+NeedBuildLocked      built, and held for the run
 			</code></pre>
 		</div>
 		<div class="col">
@@ -514,16 +623,26 @@ NeedBuildLocked      both, for the whole run
 					each is found once, by the dispatcher, not by every command</li>
 				<li class="fragment" data-fragment-index="3">the lock is declared, not a call you
 					can forget</li>
-				<li class="fragment" data-fragment-index="4">with <code>NeedBuild</code>,
-					<code>flash</code> can require a build without knowing how to build</li>
-				<li class="fragment" data-fragment-index="5">the order matters: <code>ace build</code>
-					checks for ESP-IDF first. That check is fast, and its message is more useful.</li>
+				<li class="fragment" data-fragment-index="4"><code>ace target monitor</code> declares
+					<code>NeedBuild</code>: the workspace is built before the console opens. It is
+					held only during the build, so you can build again while the monitor runs.</li>
+				<li class="fragment" data-fragment-index="5">the checks run in the listed order, and
+					the first one that fails stops the run. <code>ace build</code> lists
+					<code>NeedIDF</code> first: without ESP-IDF nothing can be built, whatever
+					state the workspace is in.</li>
 			</ul>
 		</div>
 	</div>
 	<aside class="notes">
-		This is what keeps command functions short. Most of what a command would otherwise do first - find the project, find the workspace,
-		take the lock, check the tree - is a list of constants here.
+		This is what keeps command functions short. Most of what a command would
+		otherwise do first - find the project, find the workspace, take the
+		lock, check the tree - is a list of constants here.
+
+		The constants and their comments: internal/command/command.go:681-731.
+		The checks: checkNeeds, cmd/ace/main.go:557-601. NeedBuild gives the
+		workspace back after the build at main.go:595. The reason for the order
+		is the comment at build.go:45-47. (The comment on Need says the values
+		are unordered, but checkNeeds walks the list in order.)
 	</aside>
 </section>
 
@@ -561,7 +680,7 @@ type Context struct {
 				<li class="fragment" data-fragment-index="7">the run's logger</li>
 				<li class="fragment" data-fragment-index="8">the connected program, when the command was started with
 					<code>--rpc</code>. That option is not global: only a command that supports it
-					declares it. Today that is <code>monitor</code>.</li>
+					declares it. Today that is <code>ace target monitor</code>.</li>
 			</ul>
 			<p class="caption fragment">the command only has to do its own work</p>
 		</div>
@@ -649,7 +768,7 @@ Complete: func(d *cmd.Def, _ []string, w string) []cmd.Candidate {
 	<div class="container">
 		<div class="col">
 			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-3|5-9|11-17" class="plaintext">
+				data-line-numbers="|1-3|5-9|11-16" class="plaintext">
 $ ace switch &lt;TAB&gt;
 dev
 prod
@@ -660,12 +779,11 @@ user       the user configuration file
 project    the project's own .aceconfig.yaml
 workspace  the current workspace's settings
 
-$ ace config set init.target &lt;TAB&gt;
+$ ace config set --scope project init.target &lt;TAB&gt;
 esp32    Xtensa dual-core, WiFi + BT
 esp32s2  Xtensa single-core, WiFi
 esp32c3  RISC-V, WiFi 4 + BLE
 esp32s3  Xtensa dual-core, WiFi + BLE
-esp32c6  RISC-V, WiFi 6 + BLE + 802.15.4
 ...
 			</code></pre>
 		</div>
@@ -675,9 +793,10 @@ esp32c6  RISC-V, WiFi 6 + BLE + 802.15.4
 					the <code>completeWorkspaces</code> function from the last slide, reading
 					<code>.ace/workspaces.yaml</code></li>
 				<li class="fragment" data-fragment-index="2"><code>Choices</code> on the option:
-					<code>config.ScopeChoices(true)</code>, the scopes that have a file to write
-					to. Four, not seven: built-in and command are read-only. The read verbs use
-					<code>ScopeChoices(false)</code> and get all seven.</li>
+					<code>config.ScopeChoices(true)</code>, the scopes an edit can go to. Four, not
+					seven: built-in and command have no file, and <code>--config</code> itself names
+					the file of the file scope. The read verbs use <code>ScopeChoices(false)</code>
+					and get all seven.</li>
 				<li class="fragment" data-fragment-index="3"><code>Complete</code> on the value
 					positional: <code>completeConfigValue</code> reads the key typed before it
 					and returns that key's <code>Choices</code></li>
@@ -693,7 +812,11 @@ esp32c6  RISC-V, WiFi 6 + BLE + 802.15.4
 
 		cmd/ace/switch.go:39, cmd/ace/config.go:441 and cmd/ace/config.go:219
 		are the three declarations. The value lookup is valueCandidates at
-		config.go:657, which asks the store for the key's Choices.
+		config.go:660, which asks the store for the key's Choices. Why the
+		file scope is left out: internal/config/scope.go:246-254.
+
+		The last example names --scope project because init.target cannot be
+		set in the workspace scope, which is where set writes by default.
 	</aside>
 </section>
 
@@ -734,9 +857,9 @@ func stop(p *os.Process, sig syscall.Signal) error {
 				<li class="fragment" data-fragment-index="3">the second Ctrl-C kills every child
 					still running, SIGKILL to the group, and closes its pipes so ace stops
 					reading at once</li>
-				<li class="fragment" data-fragment-index="4">while a child owns the terminal
-					(Console mode, meant for gdb) ace ignores signals: there, Ctrl-C means
-					"halt the inferior". Built; no command uses it yet.</li>
+				<li class="fragment" data-fragment-index="4">while a child uses the terminal
+					(Console mode, meant for gdb) ace ignores signals: there, Ctrl-C must reach
+					gdb and stop the program it debugs. Built; no command uses it yet.</li>
 				<li class="fragment" data-fragment-index="5">ace itself is never killed by
 					this. It waits for the children and ends the run normally.
 					<code>signal.NotifyContext</code> is not used, because it delivers only
@@ -750,7 +873,7 @@ func stop(p *os.Process, sig syscall.Signal) error {
 	<aside class="notes">
 		Verified in code and by test. The loop is internal/process/signal.go
 		lines 53 to 62. The AfterFunc that sends SIGINT to a child's group on
-		cancel is proc.go:124-129; killTracked is proc.go:222; Setpgid is
+		cancel is proc.go:118-123; killTracked is proc.go:222; Setpgid is
 		group_unix.go:18. On Windows only os.Interrupt is delivered.
 
 		The test: ace build in a scratch project, SIGINT after six seconds.
@@ -786,8 +909,8 @@ $ ace config --help
 SCOPES
     Configuration layers, lowest to highest; ...
 
-    • built-in: the defaults the commands declare in their key
-      definitions.
+    • built-in: the defaults the commands declare in their key ...
+
     • system: the config file under ACE_HOME; absent when ...
 
 $ ace config --help --format json
@@ -834,11 +957,11 @@ $ ace config --help --format json
 $ ace build &amp;                    # in one terminal
 $ ace status                     # in another
 ...
-tree       ready
-held by    ace build, pid 70795, for 2 seconds
+tree              ready
+held by           ace build, pid 6224, for 2 seconds
 
 $ ace build
-ERROR: workspace 'dev' is busy: ace build (pid 70795 on espressif)
+ERROR: workspace 'dev' is busy: ace build (pid 6224 on espressif)
        has been running for 5s
 $ echo $?
 7
@@ -849,11 +972,10 @@ $ ace workspace remove dev       # the same answer
 		</div>
 		<div class="col">
 			<ul class="tight small">
-				<li class="fragment" data-fragment-index="1">a command that changes a workspace
-					(<code>build</code>, <code>init</code>, <code>workspace remove</code>)
-					claims it for the whole run: <code>NeedWorkspaceLocked</code>. The claim is
-					a record in <code>.ace/workspaces.yaml</code>: command, pid, host, since.
-					<code>status</code> shows it.</li>
+				<li class="fragment" data-fragment-index="1"><code>build</code>, <code>init</code>
+					and <code>workspace remove</code> claim the workspace for the whole run. The
+					claim is a record in <code>.ace/workspaces.yaml</code>: command, pid, host,
+					since. <code>status</code> shows it.</li>
 				<li class="fragment" data-fragment-index="2">a second run that needs the same
 					workspace is refused at once, with exit code 7. It does not wait for the
 					first one: you would sit in front of a silent command, and your build
@@ -873,13 +995,19 @@ $ ace workspace remove dev       # the same answer
 	</div>
 	<aside class="notes">
 		All output is real: a full rebuild in the background, then the three
-		commands. The claim is workspace.Hold in internal/workspace/store.go:309;
-		the refusal is exit 7, ExitConflict. The short lock around the record
-		file is atomicio.Acquire with a two-second wait (store.go:31); it is
-		never held while cmake or ninja runs. The take-over rule is in
-		internal/atomicio/lock.go, Acquire. For idf.py I searched tools/idf.py
-		and tools/idf_py_actions for flock, lockf, filelock and portalocker:
-		nothing.
+		commands. ace build takes the claim through NeedWorkspaceLocked
+		(workspace.Hold, internal/workspace/store.go:309). ace init and ace
+		workspace remove take it with Store.Claim (store.go:291), in the same
+		edit that changes the record. The refusal is exit 7, ExitConflict.
+
+		The short lock around the record file is atomicio.Acquire with a
+		two-second wait (store.go:32); it is never held while cmake or ninja
+		runs. A claim whose process is gone (same host, no such pid) is
+		dropped when the record is read: workspace.Read, store.go:103-105,
+		and Holder.gone, store.go:350.
+
+		For idf.py I searched tools/idf.py and tools/idf_py_actions for flock,
+		lockf, filelock and portalocker: nothing.
 	</aside>
 </section>
 
@@ -900,15 +1028,19 @@ $ ace workspace remove dev       # the same answer
 		<tr><td>user</td><td><code>&lt;user config dir&gt;/ace/config.yaml</code></td></tr>
 		<tr><td>project</td><td><code>&lt;project&gt;/.aceconfig.yaml</code></td></tr>
 		<tr><td>workspace</td><td><code>&lt;project&gt;/.ace/workspaces/&lt;name&gt;/config.yaml</code></td></tr>
-		<tr><td>file</td><td>the file <code>--config</code> names. It replaces system, user and project for one run.</td></tr>
+		<tr><td>file</td><td>the file <code>--config</code> names. For one run it replaces system, user, project and workspace.</td></tr>
 		<tr><td>command</td><td>the <code>-c key=value</code> options</td></tr>
 	</table>
 	<p class="caption fragment">a higher scope replaces a lower one completely. A list key is
 		different: it collects the values from every scope.</p>
 	<aside class="notes">
 		Lowest first. Seven scopes; git has fewer, and --config is not the
-		same as git config --file: --config replaces three scopes for one
+		same as git config --file: --config replaces four scopes for one
 		run, --file edits one file.
+
+		The four: internal/config/load.go:101-112 returns right after reading
+		the --config file, so system, user, project and workspace are not
+		read. ace's own --config help still says three scopes.
 	</aside>
 </section>
 
@@ -955,6 +1087,78 @@ core:
 	</aside>
 </section>
 
+<!-- SLIDE: list keys -->
+<section>
+	<h2>A list key collects from every scope</h2>
+	<div class="container">
+		<div class="col">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|1-9|11-13|15-23|25-28" class="plaintext">
+# ~/.config/ace/config.yaml      (user scope)
+core:
+  profiles:
+    - /opt/profiles
+
+# .aceconfig.yaml                 (project scope)
+core:
+  profiles:
+    - ./team-profiles
+
+$ ace config get core.profiles
+/opt/profiles
+./team-profiles
+
+# .aceconfig.yaml, with a reset
+config:
+  reset: [core.profiles]
+core:
+  profiles:
+    - ./team-profiles
+
+$ ace config get core.profiles
+./team-profiles
+
+# .aceconfig.yaml, with an include
+config:
+  include:
+    - ace/common.yaml
+			</code></pre>
+		</div>
+		<div class="col">
+			<ul class="tight small">
+				<li class="fragment" data-fragment-index="1">the same list key, set in two scopes</li>
+				<li class="fragment" data-fragment-index="2">the values are collected, lowest scope
+					first: the project adds to what the user set. A key with one value does not
+					collect; the higher scope replaces it.</li>
+				<li class="fragment" data-fragment-index="3"><code>config.reset</code> names the keys
+					this file states alone. The values from the scopes below are dropped.</li>
+				<li class="fragment" data-fragment-index="4"><code>config.include</code> reads other
+					files before this one. This file's own values win. A path is relative to the
+					file that names it.</li>
+			</ul>
+			<p class="caption fragment" data-fragment-index="5">an included file is checked by the
+				rules of the scope that includes it, so a project cannot turn on
+				<code>core.allow-pathcmds</code> through an include. A file that includes itself,
+				directly or through another file, is refused.</p>
+		</div>
+	</div>
+	<aside class="notes">
+		All output is real. I ran it with a user file and a project file, then
+		added the reset. The include: common.yaml set core.log-level warn and
+		core.color never, .aceconfig.yaml set core.log-level error; ace config
+		get gave error and never.
+
+		With core.allow-pathcmds in the included file, ace refused the file:
+		"ace/common.yaml:2: core.allow-pathcmds: not allowed in the project
+		scope (only system, user, file, command)". An include that led back to
+		.aceconfig.yaml was refused with "reads its way back to itself".
+
+		The docs of both keys: cmd/ace/main.go:272-302. The ace config manual
+		still says "values are never merged across scopes" (config.go:46-49),
+		which is not true for list keys.
+	</aside>
+</section>
+
 <!-- SLIDE: keys defined on Def -->
 <section>
 	<h2>Every key is defined on a command <code>Def</code></h2>
@@ -968,7 +1172,7 @@ core:
     Scopes:       bindingScopes,
     Default:      []string{"build-{workspace}"},
     Placeholders: []string{"workspace","target"},
-    Help:         "where a new workspace builds",
+    Help:         "where a new workspace's build tree goes",
     Doc: cmd.Doc{
         cmd.Para("A directory of its own ..."),
     },
@@ -1015,38 +1219,43 @@ core:
 	<div class="container">
 		<div class="col">
 			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-7|9-13" class="plaintext">
+				data-line-numbers="|1-8|10-15" class="plaintext">
 $ ace config set &lt;TAB&gt;
 config.include   files this one reads before its own statements
 config.reset     keys this file states alone, ignoring the scopes below
 core.color       colourise human output
 core.log-format  stderr log format
 core.log-level   stderr log verbosity threshold
-...
+core.quiet       suppress stderr logs
+core.verbose     stderr verbosity level; -v raises it
 
-$ ace config set init.target &lt;TAB&gt;
-esp32    Xtensa dual-core, WiFi + BT
-esp32s2  Xtensa single-core, WiFi
-esp32c6  RISC-V, WiFi 6 + BLE + 802.15.4
+$ ace config set --scope project &lt;TAB&gt;
+...
+core.profiles    the directories a profile name is looked for in
+...
+init.target      the chip a new workspace is built for
 ...
 			</code></pre>
 		</div>
 		<div class="col">
 			<ul class="tight small">
 				<li class="fragment" data-fragment-index="1">the keys come from the
-					<code>Configs</code> of every command in the tree. The text next to each is
-					its <code>Help</code>.</li>
-				<li class="fragment" data-fragment-index="2">the values come from the key's
-					<code>Choices</code>, with the help text of each value</li>
+					<code>Configs</code> of every command, with their <code>Help</code>.
+					<code>set</code> writes to the workspace scope, so it offers only the 7 keys
+					that scope may set.</li>
+				<li class="fragment" data-fragment-index="2">with <code>--scope project</code> it
+					offers 19. The <code>Scopes</code> field of each key decides.</li>
 				<li class="fragment" data-fragment-index="3">nothing on this slide was written for
 					completion. The definition is read at TAB time.</li>
 			</ul>
 		</div>
 	</div>
 	<aside class="notes">
-		Real output of ace __complete. The key list is completeConfigKey and
-		the value list is completeConfigValue, both in cmd/ace/config.go;
-		the second reads the key typed before it and returns its Choices.
+		Real output of ace __complete, cut where it says "...". The key list is
+		completeSetKey, cmd/ace/config.go:803: it keeps the keys the target
+		scope may set. init.*, core.profiles, core.allow-pathcmds and the
+		workspace.* keys cannot be set in the workspace scope, so a plain set
+		does not offer them.
 	</aside>
 </section>
 
@@ -1086,10 +1295,11 @@ ERROR: ~/hello_world/.aceprofiles/ci.yaml:3:
 		</div>
 	</div>
 	<aside class="notes">
-		All four are real. The parser is Opt.Set in
-		internal/command/value.go: type first, then Choices, then the
-		Validate hook, and only then the value is stored. A value that fails
-		leaves the key unchanged.
+		All four are real. A configuration value is checked by checkValues,
+		internal/config/check.go:83: the type, then the placeholders, then
+		Choices, then the Validate hook. A flag is checked by Opt.Set in
+		internal/command/value.go, with the same type parsing. A value that
+		fails is never written.
 	</aside>
 </section>
 
@@ -1119,8 +1329,8 @@ ERROR: init.build-dir: {foo}: unknown placeholder
 					workspace is created. The default <code>build-{workspace}</code> is why
 					each workspace gets its own directory.</li>
 				<li class="fragment" data-fragment-index="3">the definition lists the
-					placeholders a key takes (<code>Placeholders:</code> two slides back). Any
-					other placeholder is rejected when the value is written.</li>
+					placeholders a key takes, in the <code>Placeholders</code> field of its
+					definition. Any other placeholder is rejected when the value is written.</li>
 			</ul>
 		</div>
 	</div>
@@ -1178,7 +1388,7 @@ size:
 	<div class="container">
 		<div class="col">
 			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-2|4-5|7-12|14-19" class="plaintext">
+				data-line-numbers="|1-2|4-5|7-15|17-25" class="plaintext">
 $ ace config set core.log-level debug
 # -> .ace/workspaces/dev/config.yaml
 
@@ -1187,17 +1397,23 @@ $ ace config set --scope project init.target esp32c3
 
 $ ace config list --all
 built-in   string  core.color=auto
+...
 workspace  string  core.log-level=debug
 built-in   string  core.log-level=info
+...
 project    string  init.target=esp32c3
 built-in   string  init.target=esp32
+...
 
 $ ace config describe init.build-dir
     init.build-dir
+        A directory of its own for each workspace, ...
+        ...
         type     string
         default  build-{workspace}
         scopes   system, user, project, file, command
         carries  workspace, target
+        command  ace init
 			</code></pre>
 		</div>
 		<div class="col">
@@ -1210,7 +1426,7 @@ $ ace config describe init.build-dir
 				<li class="fragment" data-fragment-index="3"><code>list --all</code> also shows the
 					values that were replaced, with the scope of each</li>
 				<li class="fragment" data-fragment-index="4"><code>describe</code> prints the
-					definition from the <code>Def</code></li>
+					definition from the <code>Def</code>, and the command that defines the key</li>
 				<li class="fragment" data-fragment-index="5">the other verbs: <code>get</code>,
 					<code>unset</code>, <code>append</code> and <code>remove</code> for list
 					keys. Files are edited in place, so comments are kept, and the write is
@@ -1219,9 +1435,9 @@ $ ace config describe init.build-dir
 		</div>
 	</div>
 	<aside class="notes">
-		All output is real. The in-place edit is internal/config/write.go,
-		the atomic replace is internal/atomicio. A crash cannot leave half a
-		file.
+		All output is real, cut where it says "...". The in-place edit is
+		internal/config/write.go, the atomic replace is internal/atomicio. A
+		crash cannot leave half a file.
 	</aside>
 </section>
 
@@ -1236,12 +1452,13 @@ $ ace config describe init.build-dir
 	<div class="container">
 		<div class="col">
 			<pre><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|2|3|4|5|6" class="go">
+				data-line-numbers="|2|3|4|5|6|7" class="go">
 type Emitter interface {
     Started() error
-    Result(data any, human func(io.Writer))
-    Event(ev Event, human func(io.Writer))
+    Result(data any, human func(w io.Writer))
+    Event(ev Event, human func(w io.Writer))
     Diagnostic(d Diagnostic)
+    log(rec slog.Record)
     Finished(err error) int
 }
 			</code></pre>
@@ -1256,7 +1473,9 @@ type Emitter interface {
 					name the command declared</li>
 				<li class="fragment" data-fragment-index="4">one problem the user can fix, printed the same
 					way by every command</li>
-				<li class="fragment" data-fragment-index="5">closes the run and returns the exit code</li>
+				<li class="fragment" data-fragment-index="5">a log line. It is not exported: a command
+					logs with <code>log/slog</code>, and only the emitter prints the line.</li>
+				<li class="fragment" data-fragment-index="6">closes the run and returns the exit code</li>
 			</ul>
 			<p class="caption fragment">a command uses an <code>Emitter</code> and knows
 				nothing else. The dispatcher reads <code>--format</code>, <code>-q</code>, whether stdout
@@ -1265,7 +1484,15 @@ type Emitter interface {
 		</div>
 	</div>
 	<aside class="notes">
-		Result and Event look alike and do different things: a result is stored and printed once at the end, and there is one per run. An event is printed as soon as it happens, and there can be any number.
+		internal/ide/emitter.go:93-149.
+
+		Result and Event look alike and do different things: a result is
+		stored and printed once at the end, and there is one per run. An event
+		is printed as soon as it happens, and there can be any number.
+
+		log is lower case on purpose (emitter.go:126-141): nothing outside
+		internal/ide can call it, so a command cannot print a log line in a
+		style of its own.
 	</aside>
 </section>
 
@@ -1275,12 +1502,13 @@ type Emitter interface {
 	<div class="container">
 		<div class="col">
 			<pre><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-9|11-12" class="go">
+				data-line-numbers="|1-10|12-13" class="go">
 doc := buildDocument{
     SchemaVersion: buildSchemaVersion,
     Workspace:     activeWorkspace,
     Target:        rec.Target,
     ProjectName:   tree.Project.ProjectName,
+    SourceDir:     b.SourceDir,
     BuildDir:      b.BuildDir,
     App:           image(b.BuildDir, tree.Project.AppBin),
     ELF:           image(b.BuildDir, tree.Project.AppELF),
@@ -1294,20 +1522,21 @@ c.Emitter.Result(doc,
 		<div class="col">
 			<ul class="tight small">
 				<li class="fragment" data-fragment-index="1"><code>ace build</code> puts its result
-					in one struct: the workspace, the target, the build directory, the app
-					image and the ELF</li>
+					in one struct: the workspace, the target, the project, the directories, the
+					app image and the ELF</li>
 				<li class="fragment" data-fragment-index="2">it passes the data and the function
 					that prints it <b>together</b>, in one call</li>
-				<li class="fragment" data-fragment-index="3">so the two cannot disagree. There is
-					one result.</li>
+				<li class="fragment" data-fragment-index="3">the text is printed from the same
+					struct, so it cannot show a value the data does not have</li>
 				<li class="fragment" data-fragment-index="4">the emitter calls the print function
 					only when a person is reading</li>
 			</ul>
 		</div>
 	</div>
 	<aside class="notes">
-		That is the whole idea. You cannot add a field to the JSON and
-		forget the text, because they are written in the same statement.
+		cmd/ace/build.go:87-97. The data and the text are made in one
+		statement, from one struct. The text can still leave a field out, but
+		it cannot show a different value.
 	</aside>
 </section>
 
@@ -1317,7 +1546,7 @@ c.Emitter.Result(doc,
 	<div class="container">
 		<div class="col">
 			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-5|7-13|15-18" class="plaintext">
+				data-line-numbers="|1-5|7-17|19-22" class="plaintext">
 $ ace status
 project           ~/hello_world
 workspace         dev
@@ -1326,16 +1555,20 @@ target            esp32c6
 
 $ ace status --format json
 {
-  "command": ["status"],
+  "schema": "https://schemas.espressif.com/ace/result/v1",
+  ...
   "status": "ok",
   "exit_code": 0,
-  "data": { "workspace": "dev", "target": "esp32c6", ... }
-}
+  ...
+  "data": {
+    ...
+    "workspace": "dev",
+    ...
 
 $ ace status --format ndjson
-{"seq":1,"run_id":"01M371RK...","event":"started",...}
-{"seq":2,"run_id":"01M371RK...","event":"log","level":"debug",...}
-{"seq":3,"run_id":"01M371RK...","event":"finished","result":{...}}
+{"ts":"...","seq":1,"run_id":"01M3...","event":"started",...}
+{"ts":"...","seq":2,"run_id":"01M3...","event":"log","level":"debug",...}
+{"ts":"...","seq":3,"run_id":"01M3...","event":"finished","result":{...}}
 			</code></pre>
 		</div>
 		<div class="col">
@@ -1346,25 +1579,119 @@ $ ace status --format ndjson
 					result inside an envelope with the exit code. The default when stdout is
 					not a terminal, so a script gets it without a flag.</li>
 				<li class="fragment" data-fragment-index="3"><code>ndjson</code>: one JSON line
-					per event, written while the run goes. For a program that wants progress,
-					not only the end. Every line has the run's id, and <code>seq</code> always
-					increases.</li>
+					per event, written while the run goes. Every line has the run's id, and
+					<code>seq</code> always increases.</li>
 				<li class="fragment" data-fragment-index="4"><code>--rpc</code> sends the same
-					events over a connection to another program. Only a command that supports
-					it declares the option; today that is <code>monitor</code>.</li>
-				<li class="fragment" data-fragment-index="5">there is no <code>core.format</code>
-					config key, on purpose. Some commands write their own text to stdout
-					(<code>ace completion bash</code> prints a shell script) and could not obey
-					it.</li>
+					events to another program. Only a command that supports it declares the
+					option; today that is <code>ace target monitor</code>.</li>
+				<li class="fragment" data-fragment-index="5">every JSON document has a schema in
+					<code>schemas/</code>, made from its Go struct. A test checks each command's
+					output against it.</li>
+				<li class="fragment" data-fragment-index="6">no <code>core.format</code> key, on
+					purpose: every command would have to follow it. The hidden
+					<code>ace idf component</code> commands cannot, because CMake reads their
+					stdout.</li>
 			</ul>
 		</div>
 	</div>
 	<aside class="notes">
-		All three are real output of ace status, trimmed. The rule for the
-		default is in the --format documentation: human on a terminal, json
-		when redirected. ndjson also carries an args_digest per run, so a
-		reader can tell two runs of the same command apart without the
-		command line being printed again.
+		All three are real output of ace status, cut where it says "...". The
+		rule for the default is in the --format documentation: human on a
+		terminal, json when redirected. One exception: ace completion bash
+		prints the script even into a pipe (Def.HumanDefault), because the
+		install line is eval "$(ace completion bash)". An explicit --format
+		still wins there too.
+
+		ndjson also carries an args_digest per run, so a reader can tell two
+		runs of the same command apart without the command line being printed
+		again.
+
+		The schemas: 18 files in schemas/, checked by cmd/ace/contract_test.go
+		under go test on all three systems. The test came with Roland's CI
+		commit; the schemas grew with each command.
+
+		core.format was removed in 606bd24f. The commit message: a config key
+		may back an option only if every command can honour it. The two that
+		cannot are ace idf component prepare and inject (OwnsStdout,
+		cmd/ace/component.go:64 and 150).
+	</aside>
+</section>
+
+<!-- SLIDE: exit codes -->
+<section>
+	<h2>Exit codes</h2>
+	<div class="container">
+		<div class="col">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|3-14|5|6|9|10|11|13-14" class="go">
+// internal/fault/exit.go
+const (
+    ExitOK          = 0   // complete success
+    ExitInternal    = 1   // unexpected fault: a bug
+    ExitUsage       = 2   // bad flags, arguments, or subcommand
+    ExitUser        = 3   // valid usage, a fixable precondition unmet
+    ExitNotFound    = 4   // a required resource or device is not there
+    ExitPermission  = 5   // access denied
+    ExitEnvironment = 6   // toolchain or environment not set up
+    ExitConflict    = 7   // conflicts with the current state
+    ExitNoData      = 8   // the query ran and has no answer
+    ExitTimeout     = 124 // the operation exceeded its deadline
+    ExitInterrupted = 130 // cancelled by SIGINT (128 + signal)
+    ExitTerminated  = 143 // cancelled by SIGTERM (128 + signal)
+)
+			</code></pre>
+			<pre class="tiny fragment" data-fragment-index="8"><code data-trim data-noescape class="plaintext">
+$ ace --format json switch nope
+{
+  ...
+  "status": "error",
+  "exit_code": 3,
+  ...
+  "error": {
+    "category": "user",
+    "message": "no such workspace: nope (this project has dev, prod)",
+    "exit_code": 3
+  }
+}
+			</code></pre>
+		</div>
+		<div class="col">
+			<ul class="tight small">
+				<li class="fragment" data-fragment-index="1">each code means one thing, and the
+					numbers do not change. A script knows what happened from the code alone.</li>
+				<li class="fragment" data-fragment-index="2">2: the command line is wrong, for
+					example <code>ace --bogus status</code></li>
+				<li class="fragment" data-fragment-index="3">3: the line is right, but something
+					you can fix is missing, for example <code>ace switch nope</code></li>
+				<li class="fragment" data-fragment-index="4">6: <code>ace build</code> when no
+					ESP-IDF is activated</li>
+				<li class="fragment" data-fragment-index="5">7: a second <code>ace build</code> on
+					a busy workspace</li>
+				<li class="fragment" data-fragment-index="6">8 is not a failure: the query ran and
+					found nothing, for example <code>ace config get</code> of a key that no scope
+					sets</li>
+				<li class="fragment" data-fragment-index="7">130 and 143 are defined, but not used
+					yet. A build stopped with Ctrl-C ends with 3.</li>
+				<li class="fragment" data-fragment-index="8">the JSON result has the code and a
+					category: usage, user, environment, internal, cancelled or timeout</li>
+			</ul>
+		</div>
+	</div>
+	<aside class="notes">
+		The table is internal/fault/exit.go:20-33 and its comment says why:
+		a caller recovers what kind of outcome it was from the status alone,
+		with no message to parse, so each code means one thing and the numbers
+		never move.
+
+		Every example is measured: ace --bogus status gave 2, ace switch nope
+		gave 3, ace build with no IDF_PATH gave 6 ("IDF_PATH is not set: run .
+		&lt;esp-idf&gt;/export.sh first"), a busy workspace gave 7, and ace config
+		get of an unset key gave 8 and printed nothing.
+
+		8 is like grep's 1, "nothing matched". ace cannot use 1 for it, because
+		1 means a bug in ace. The categories are fault.Category, exit.go:37-44.
+		130 and 143 exist, but nothing maps a signal to them yet; see the
+		signals slide.
 	</aside>
 </section>
 
@@ -1373,37 +1700,53 @@ $ ace status --format ndjson
 	<h2>A command declares the events it may send</h2>
 	<div class="container">
 		<div class="col">
-			<pre><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-4|6-9" class="go">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|2-5|14-15|6-11" class="go">
+// cmd/ace/monitor.go
 Events: []cmd.EventDef{
     {Name: ide.EventConsoleOutput,
-     Help: "what the build said while it ran"},
+     Help: "bytes the device sent on its console"},
+},
+Controls: []cmd.ControlDef{
+    {Name: controlSendKeystroke,
+     Help: "send one keystroke to the device"},
+    {Name: controlReset, Help: "restart the target"},
+    {Name: controlStop, Help: "end the session"},
 },
 
-// and then, while working:
-c.Emitter.Event(
-    ide.ConsoleOutput(line),
-    func(w io.Writer) { fmt.Fprintln(w, line) })
+// and for each read from the port:
+c.Emitter.Event(&amp;ide.ConsoleOutput{Text: text},
+    func(w io.Writer) { _, _ = io.WriteString(w, text) })
 			</code></pre>
 		</div>
 		<div class="col">
 			<ul class="tight small">
-				<li class="fragment" data-fragment-index="1">declared here, so <code>--help
+				<li class="fragment" data-fragment-index="1">declared, so <code>--help
 					--format json</code> lists the events a program may receive, and a
-					connected program is told before the run starts</li>
+					connected program is told when it connects</li>
 				<li class="fragment" data-fragment-index="2">sent while working: the event's data
 					and the text for a person, in one call, like <code>Result</code></li>
-				<li class="fragment" data-fragment-index="3">an event the command did not declare
-					is a <b>startup panic</b></li>
-				<li class="fragment" data-fragment-index="4"><code>Controls</code> is the opposite
-					direction: what a connected program may <b>ask</b> the command to do while it
-					runs &mdash; e.g. <code>monitor/reset</code></li>
+				<li class="fragment" data-fragment-index="3"><code>Controls</code> is the other
+					direction: what a connected program may <b>ask</b> the monitor to do while it
+					runs</li>
+				<li class="fragment" data-fragment-index="4">a test checks that the controls the
+					monitor declares and the controls it answers are the same list</li>
 			</ul>
-			<p class="caption fragment" data-fragment-index="5">3 commands declare events today,
-				1 declares controls</p>
+			<p class="caption fragment" data-fragment-index="5">3 commands declare events today
+				(<code>build</code>, <code>init</code>, <code>target monitor</code>), 1 declares
+				controls</p>
 		</div>
 	</div>
 	<aside class="notes">
+		cmd/ace/monitor.go:133-140 and 224-226. ace build and ace init send the
+		same event another way: they give cmake an ide.ConsoleWriter
+		(internal/ide/console.go:21), which sends each chunk of cmake's output
+		as a console-output event.
+
+		Nothing checks at run time that an event was declared. A test checks
+		the controls against their list:
+		TestMonitorControlsAreDeclaredAndServed (cmd/ace/monitor_test.go:153).
+
 		The IDE case is the reason. An editor wants the build output as it
 		arrives and wants to press a reset button on the monitor. Both are
 		declared, so the editor is never guessing.
@@ -1416,7 +1759,7 @@ c.Emitter.Event(
 	<div class="container">
 		<div class="col">
 			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-3|5-6|8-9|11-12" class="plaintext">
+			     data-line-numbers="|1-3|5-6|8-9|11-13" class="plaintext">
 // cmd/ace/main.go
 slog.SetDefault(slog.New(ide.LogEvents(logLevel)))
 slog.Debug("ace starting", "format", setup.Format, ...)
@@ -1425,10 +1768,11 @@ $ ace -vv status
 ace starting format=human log_format=text log_level=DEBUG ...
 
 $ ace --log-format json --log-level debug status
-{"level":"DEBUG","msg":"ace starting","run_id":"01M37EV3...",...}
+{"time":"...","level":"DEBUG","msg":"ace starting",...}
 
 $ ace --format ndjson status
-{"seq":2,"event":"log","level":"debug","message":"ace starting",...}
+{"ts":"...","seq":2,"run_id":"01M3...","event":"log",
+ "level":"debug","message":"ace starting",...}
 			</code></pre>
 		</div>
 		<div class="col">
@@ -1440,8 +1784,8 @@ $ ace --format ndjson status
 					stderr as text. <code>-v</code>, <code>-vv</code>, <code>-q</code> and
 					<code>--log-level</code> decide how much is shown.</li>
 				<li class="fragment" data-fragment-index="3"><code>--log-format json</code>
-					prints the same line as one JSON object per line, still on stderr, with the
-					run's id</li>
+					prints the same line as one JSON object per line, still on stderr. The line
+					also carries the run's id.</li>
 				<li class="fragment" data-fragment-index="4">with <code>--format ndjson</code> or
 					<code>--rpc</code> the line becomes a <code>log</code> event in the stream.
 					The stderr controls do not filter the stream: a program gets every line.</li>
@@ -1475,8 +1819,8 @@ $ idf.py build
 # ... now I need S3
 
 $ idf.py set-target esp32s3
-# the C6 build tree is gone
-# the sdkconfig is gone
+# the C6 build tree is removed
+# sdkconfig is renamed to sdkconfig.old
 			</code></pre>
 		</div>
 		<div class="col fragment">
@@ -1490,13 +1834,19 @@ $ ace build          # C6, in build-dev
 $ ace switch prod
 $ ace build          # S3, in build-prod
 			</code></pre>
-			<p class="caption">both build trees stay. Switching takes no time.</p>
+			<p class="caption">both build trees stay. Switching changes one line in
+				<code>.ace/workspaces.yaml</code>; nothing is rebuilt.</p>
 		</div>
 	</div>
 	<aside class="notes">
 		This is the user-visible reason workspaces exist. Everything else
 		about them follows from wanting two configured builds of one source
 		tree to coexist.
+
+		idf.py set-target depends on fullclean
+		(tools/idf_py_actions/core_ext.py:782-800), and cmake renames the old
+		sdkconfig to sdkconfig.old (tools/cmake/project.cmake:111-114). A
+		second set-target overwrites that .old file.
 	</aside>
 </section>
 
@@ -1506,7 +1856,7 @@ $ ace build          # S3, in build-prod
 	<div class="container">
 		<div class="col">
 			<pre><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-2|3-11|12-13" class="yaml">
+			     data-line-numbers="|1-2|3-10|11-12" class="yaml">
 version: 1
 current: dev
 workspaces:
@@ -1517,7 +1867,7 @@ workspaces:
       sdkconfig: sdkconfig.dev
       generator: Ninja
       idf-path: ~/esp-idf
-    created:    2026-09-23T07:48:18Z
+    created: 2026-09-23T07:48:18Z
     configured: 2026-09-23T07:48:24Z
 			</code></pre>
 			<p class="caption"><code>.ace/workspaces.yaml</code></p>
@@ -1533,8 +1883,9 @@ workspaces:
 					last configured</li>
 				<li class="fragment" data-fragment-index="4">to change the binding you run
 					<code>ace init</code> again. The build tree is cleared, because cmake keeps
-					the generator, the source dir and every define until its cache is gone. The
-					workspace's own configuration file is removed too.</li>
+					the generator, the source dir and every define until its cache is gone.
+					The sdkconfig is moved to <code>sdkconfig.dev.old</code>, and the workspace's
+					own settings are written again from the profile.</li>
 			</ul>
 		</div>
 	</div>
@@ -1542,6 +1893,12 @@ workspaces:
 		I say "decided when it is created" and not "immutable". You can change
 		the binding, but only by running init again, and that clears the build
 		tree. cmake cannot change those values in place.
+
+		Measured: ace init dev esp32c6 on an existing dev printed "WARNING:
+		ESP-ACE-0001: sdkconfig.dev starts again from its defaults ... kept as
+		sdkconfig.dev.old", and a value set with ace config set in that
+		workspace was gone. Code: runInit, cmd/ace/init.go:425-468, and
+		workspace.Create, internal/workspace/create.go:96-127.
 	</aside>
 </section>
 
@@ -1552,29 +1909,35 @@ workspaces:
 		<div class="col">
 			<pre><code data-trim data-noescape class="bash">
 # without
-$ idf.py -B build-c6 -D SDKCONFIG=... build
-$ idf.py -B build-c6 -D SDKCONFIG=... flash
-$ idf.py -B build-c6 -D SDKCONFIG=... monitor
+$ idf.py -B build-c6 build
+$ idf.py -B build-c6 monitor
 			</code></pre>
 		</div>
 		<div class="col fragment">
 			<pre><code data-trim data-noescape class="bash">
 # with
 $ ace build
-$ ace flash
-$ ace monitor
+$ ace target monitor
 			</code></pre>
 		</div>
 	</div>
 	<ul class="tight small">
 		<li class="fragment">the current workspace is what every later command acts on</li>
 		<li class="fragment"><code>ace build</code> takes <b>no</b> argument about the build</li>
-		<li class="fragment">a project with no workspace gets a default one. It builds where ESP-IDF's own tools build. So ace is useful before you learn any of this.</li>
+		<li class="fragment">a project with no workspace gets a default one when a command needs
+			it: in <code>build</code>, with <code>sdkconfig</code>, where ESP-IDF's own tools
+			build. <code>ace init</code> with no arguments makes the same one;
+			<code>ace init -t esp32c3</code> makes it for another chip.</li>
 	</ul>
 	<aside class="notes">
 		The default workspace matters for adoption. Someone who has never
 		heard the word workspace types ace build and gets what idf.py build
 		would have given them, in the same directory.
+
+		Measured on a fresh project: ace init -t esp32c3 printed "default:
+		esp32c3 in build". The default comes from workspace.default-profile
+		(the profile "default") and is only made when the project has no
+		workspace at all (makeImplicit, cmd/ace/main.go:688-743).
 	</aside>
 </section>
 
@@ -1584,7 +1947,7 @@ $ ace monitor
 	<div class="container">
 		<div class="col">
 			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-2|4-6|8-9|11-20" class="bash">
+			     data-line-numbers="|1-2|4-6|8-9|11-21" class="bash">
 $ ace init dev esp32c6
 dev: esp32c6 in build-dev
 
@@ -1605,7 +1968,7 @@ ESP-IDF           ~/esp-idf
 configured        48 seconds ago
 last build        less than a second ago
 tree              ready
-other workspaces  1
+other workspaces  1 (ace workspace list says what they are)
 			</code></pre>
 		</div>
 		<div class="col">
@@ -1631,19 +1994,80 @@ other workspaces  1
 	</aside>
 </section>
 
+<!-- SLIDE: no take-over -->
+<section>
+	<h2>A workspace never takes another one's files</h2>
+	<div class="container">
+		<div class="col">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|1-4|6-8|10-12|14-17" class="plaintext">
+$ mkdir build-x
+$ ace init x esp32c6
+ERROR: build directory 'build-x' already exists and no workspace uses
+       it - remove it, or use -b to name another
+
+$ ace init test esp32c6 -b build-dev
+ERROR: build directory 'build-dev' is already used by workspace 'dev'
+       - use -b to name another
+
+$ ace init test esp32c6 -s sdkconfig.dev
+ERROR: sdkconfig 'sdkconfig.dev' is already used by workspace 'dev', and
+       menuconfig would edit both - use -s to name another
+
+$ find .ace -type f
+.ace/workspaces.yaml
+.ace/workspaces/nightly/sdkconfig.entries
+.ace/workspaces/nightly/config.yaml
+			</code></pre>
+		</div>
+		<div class="col">
+			<ul class="tight small">
+				<li class="fragment" data-fragment-index="1"><code>init</code> makes a new build
+					directory. It refuses one that already exists: it may hold an idf.py build
+					or your own files. ace clears only trees it made.</li>
+				<li class="fragment" data-fragment-index="2">two workspaces cannot share a build
+					directory: the next <code>init</code> of one would clear the other</li>
+				<li class="fragment" data-fragment-index="3">or an sdkconfig: menuconfig in one
+					would change the other</li>
+				<li class="fragment" data-fragment-index="4">ace keeps its own files in
+					<code>.ace</code>, never in the build tree. The build tree is cmake's alone,
+					so removing it loses nothing of ace's.</li>
+			</ul>
+		</div>
+	</div>
+	<aside class="notes">
+		All output is real, from a project with the workspaces dev, prod and
+		nightly. A failed init writes nothing: the checks run in the same edit
+		of the record that would add the workspace
+		(record, internal/workspace/create.go:184-217).
+
+		The checks: free (create.go:224-234) for a directory that is already
+		there, checkCollisions (create.go:385-444) for another workspace's
+		directory or sdkconfig. A build directory inside another's is refused
+		too: "build directory 'build-dev/sub' is inside workspace 'dev's build
+		directory 'build-dev', which an init of 'dev' clears".
+
+		Nothing in the build tree: commit c2615093. Before it, ace kept a lock,
+		a "configured" mark and the board defaults file inside the tree. Now
+		the record holds the claim and the timestamps, and the sdkconfig lines
+		go to .ace/workspaces/&lt;name&gt;/sdkconfig.entries.
+	</aside>
+</section>
+
 <!-- SLIDE: tree guard -->
 <section>
 	<h2>The build tree must still match the workspace</h2>
 	<div class="container">
 		<div class="col">
 			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-2|4-6|8-11" class="bash">
+			     data-line-numbers="|1-2|4-7|9-13" class="bash">
 # something else reconfigured build-dev, or emptied it
 $ rm build-dev/CMakeCache.txt
 
 $ ace status
 ...
-tree       ~/hello_world/build-dev holds no build tree cmake configured
+tree              ~/hello_world/build-dev holds no build tree cmake
+                  configured
 
 $ ace build
 ERROR: ~/hello_world/build-dev holds no build tree cmake configured
@@ -1666,7 +2090,11 @@ $ echo $?
 	</div>
 	<aside class="notes">
 		Catches somebody running idf.py set-target in the same directory, or
-		a cmake invocation from an IDE. We refuse rather than give you a binary with the wrong name.
+		a cmake invocation from an IDE. The check compares the target, the
+		sdkconfig, the generator, the source directory and the ESP-IDF path
+		with what the tree was configured with (readyTree,
+		cmd/ace/main.go:769-797). We refuse instead of building something the
+		workspace does not describe.
 	</aside>
 </section>
 
@@ -1677,79 +2105,206 @@ $ echo $?
 
 <!-- SLIDE: what a profile is -->
 <section>
-	<h2>A template for making a workspace</h2>
-	<ul class="tight small">
-		<li class="fragment">an ordinary configuration file &mdash; same parser, same key
-			definitions, same validation</li>
-		<li class="fragment">named on the command line: <code>ace init dev esp32c6</code></li>
-		<li class="fragment">it is <b>not a scope</b>. It is read once, when the workspace is created,
-			and never again</li>
-		<li class="fragment">so it cannot change the run that applies it</li>
-	</ul>
-	<pre class="fragment"><code data-trim data-noescape class="plaintext">
-$ ace profile list
-  esp32c6  chip   esp32c6  builtin  RISC-V, WiFi 6 + BLE + 802.15.4
-  esp32p4  chip   esp32p4  builtin  RISC-V dual-core + LP, HMI-focused
-  default                  builtin  builds where ESP-IDF's own tools build
-  esp32_p4_function_ev_board  board  esp32p4  builtin  ESP32-P4 Function EV Board
-  m5stack_core_s3             board  esp32s3  builtin  M5Stack Core S3
-	</code></pre>
-	<p class="caption fragment">14 chips and 18 boards, built into the binary. Nothing to download.</p>
+	<h2>A profile is a template for a workspace</h2>
+	<div class="container">
+		<div class="col">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|1-2|4-10|10|8" class="plaintext">
+$ ace init dev esp32c6
+dev: esp32c6 in build-dev
+
+$ ace profile show esp32c6
+profile      esp32c6
+type         chip
+source       builtin
+file         &lt;built-in esp32c6&gt;
+description  RISC-V, WiFi 6 + BLE + 802.15.4
+binds        init.target = esp32c6
+			</code></pre>
+		</div>
+		<div class="col">
+			<ul class="tight small">
+				<li class="fragment" data-fragment-index="1"><code>ace init &lt;workspace&gt;
+					&lt;profile&gt;</code>: the second word is the profile the workspace is made
+					from</li>
+				<li class="fragment" data-fragment-index="2"><code>ace profile show</code> prints what
+					a profile states, and where it comes from</li>
+				<li class="fragment" data-fragment-index="3">a chip profile states one key: the chip</li>
+				<li class="fragment" data-fragment-index="4">a profile is a YAML configuration file,
+					with the same keys, types and checks as the scopes. The ones ace ships are
+					built into the binary.</li>
+			</ul>
+			<p class="caption fragment" data-fragment-index="5">a profile is not a scope.
+				<code>ace init</code> reads it once, when it makes the workspace. Later commands
+				read the workspace, not the profile.</p>
+		</div>
+	</div>
 	<aside class="notes">
-		Boards were originally a separate concept with their own command.
-		They were merged into profiles, because a board is a profile with a few more keys. One concept is better than two.
+		Both outputs are real. ace profile --help says it the same way: "A
+		profile is a configuration file that states what a workspace is built
+		from. ace init reads the profile named on its command line and creates
+		the workspace from it."
+
+		Not a scope: internal/profile/load.go, Load. The file never joins the
+		configuration chain, so its settings do not change the ace init run
+		that reads it.
+	</aside>
+</section>
+
+<!-- SLIDE: shipped profiles -->
+<section>
+	<h2>The profiles ace ships</h2>
+	<pre class="tiny"><code data-trim data-noescape class="plaintext">
+$ ace profile list
+  ci                                 esp32c6   project  what CI builds
+  esp32                       chip   esp32     builtin  Xtensa dual-core, WiFi + BT
+  ...
+  esp32c6                     chip   esp32c6   builtin  RISC-V, WiFi 6 + BLE + 802.15.4
+  ...
+  default                                      builtin  builds where ESP-IDF's own tools build
+  esp-box-3                   board  esp32s3   builtin  ESP32-S3-BOX-3
+  ...
+  esp32_p4_function_ev_board  board  esp32p4   builtin  ESP32-P4 Function EV Board
+  ...
+	</code></pre>
+	<ul class="tight small">
+		<li class="fragment">one profile for each chip ace builds for: 14. They are made from the
+			chip list in the code, so a new chip gets a profile with no new file.</li>
+		<li class="fragment">one for each Espressif development board ace knows: 18 YAML files</li>
+		<li class="fragment"><code>default</code> is used when <code>ace init</code> names no
+			profile. It builds in <code>build</code>, with <code>sdkconfig</code>, where ESP-IDF's
+			own tools build.</li>
+		<li class="fragment">the project's own profiles come first. Here that is <code>ci</code>,
+			from <code>.aceprofiles/</code>.</li>
+	</ul>
+	<p class="caption fragment">all built into the binary. Nothing to download.</p>
+	<aside class="notes">
+		Real output, cut where it says "...". The chip profiles are made from
+		the target list (internal/profile/builtin.go:31-57); the boards and
+		default are internal/profile/builtin/*.yaml.
+
+		Boards used to be a table in internal/target/board.go, reached as the
+		second argument of ace init and listed by ace target list. Commit
+		92a52eee replaced the table with profiles, because a board is a
+		profile: a chip, sdkconfig lines, and what the build must contain.
+		One idea is simpler than two.
 	</aside>
 </section>
 
 <!-- SLIDE: two halves -->
 <section>
-	<h2>A profile has exactly two halves</h2>
+	<h2>A profile's keys go to two places</h2>
 	<div class="container">
 		<div class="col">
-			<pre><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|4-8|9-11" class="yaml">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|1-2|5-6|2,7-10,17-20|11-12,14-16" class="plaintext">
+$ ace init nightly ci
+nightly: esp32c6 in build-nightly
+
+# .aceprofiles/ci.yaml
 profile:
   description: what CI builds
-  extends: esp32c6
-init:                     # BINDS
-  build-dir: build-ci     #   what the
-  sdkconfig: sdkconfig.ci #   workspace
-  sdkconfig-entries:      #   is made of
+init:
+  target: esp32c6
+  sdkconfig-entries:
     - CONFIG_COMPILER_OPTIMIZATION_SIZE=y
-core:                     # SETTLES
-  log-level: warn         #   the workspace's
-                          #   own settings
+core:
+  log-level: warn
+
+$ cat .ace/workspaces/nightly/config.yaml
+core:
+  log-level: warn
+$ cat .ace/workspaces/nightly/sdkconfig.entries
+# Written by ace from what this workspace's binding states,
+# and again on every ace init. Edit the configuration instead.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 			</code></pre>
-			<p class="caption"><code>.aceprofiles/ci.yaml</code></p>
 		</div>
 		<div class="col">
-			<pre class="tiny fragment"><code data-trim data-noescape data-line-numbers="7-11|12" class="bash">
-$ ace profile show ci
-profile      ci
-source       project
-file         ~/hello_world/.aceprofiles/ci.yaml
-description  what CI builds
-extends      esp32c6
-binds        init.build-dir = build-ci
-             init.sdkconfig = sdkconfig.ci
-             init.sdkconfig-entries =
-                 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
-             init.target = esp32c6
-settles      core.log-level = warn
-			</code></pre>
 			<ul class="tight small">
-				<li class="fragment" data-fragment-index="1"><code>init.*</code> becomes the binding of the
-					new workspace</li>
-				<li class="fragment" data-fragment-index="2">everything else is written into the
-					workspace's own configuration, so a profile can set <b>ace</b> options
-					too, not only cmake ones</li>
-				<li class="fragment" data-fragment-index="3">a key that is neither is rejected, with
-					the file name and the line number</li>
+				<li class="fragment" data-fragment-index="1"><code>ace init nightly ci</code> makes the
+					workspace <code>nightly</code> from the profile <code>ci</code></li>
+				<li class="fragment" data-fragment-index="2"><code>profile.*</code> describes the
+					profile. It is not copied into the workspace.</li>
+				<li class="fragment" data-fragment-index="3"><code>init.*</code> binds the workspace:
+					the chip, the paths, the sdkconfig lines. ace records the result in
+					<code>.ace/workspaces.yaml</code> and gives it to cmake.</li>
+				<li class="fragment" data-fragment-index="4">every other key goes into the
+					workspace's own configuration file. Later commands read it there.</li>
 			</ul>
+			<p class="caption fragment" data-fragment-index="5">a key that fits neither place is an
+				error, and <code>ace init</code> refuses the whole profile</p>
 		</div>
 	</div>
 	<aside class="notes">
-		The third case is the interesting decision: a profile with a key that has no effect is a mistake. ace reports it instead of ignoring it.
+		A real run on hello_world. The record of nightly in
+		.ace/workspaces.yaml has target esp32c6, build-dir build-nightly,
+		sdkconfig sdkconfig.nightly, generator Ninja and idf-path. cmake got
+		SDKCONFIG_DEFAULTS=.ace/workspaces/nightly/sdkconfig.entries, and
+		sdkconfig.nightly has CONFIG_COMPILER_OPTIMIZATION_SIZE=y.
+
+		The split is internal/profile/load.go, split: init.* goes to the
+		binding, a key the workspace scope may set goes to the settings,
+		profile.* stays with the profile. Anything else is refused, for
+		example core.allow-pathcmds: "a profile has nowhere to put this key -
+		it does not bind a workspace, and a workspace's configuration may not
+		state it", with the file and the line.
+	</aside>
+</section>
+
+<!-- SLIDE: extends -->
+<section>
+	<h2>A profile can build on another one</h2>
+	<div class="container">
+		<div class="col">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|4,11|12-13,17|7,14-16" class="plaintext">
+# .aceprofiles/s3box.yaml
+profile:
+  description: our S3 box build
+  extends: m5stack_core_s3
+init:
+  sdkconfig-entries:
+    - CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+$ ace profile show s3box
+...
+extends      m5stack_core_s3
+binds        init.require-component = espressif/m5stack_core_s3, ...
+             init.require-config = CONFIG_BSP_SELECT_M5STACK_CORE_S3
+             init.sdkconfig-entries = CONFIG_BSP_SELECT_M5STACK_CORE_S3=y,
+                 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y,
+                 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+             init.target = esp32s3
+			</code></pre>
+		</div>
+		<div class="col">
+			<ul class="tight small">
+				<li class="fragment" data-fragment-index="1"><code>profile.extends</code> names
+					another profile. The name is looked up like a name on the command line: your
+					directories first, then what ace ships.</li>
+				<li class="fragment" data-fragment-index="2">the other profile is read first and this
+					one second, so this one wins where both state a key. The chip and the board's
+					requirements come from <code>m5stack_core_s3</code>.</li>
+				<li class="fragment" data-fragment-index="3">a list key collects: the board's two
+					lines, then this profile's line</li>
+			</ul>
+			<p class="caption fragment" data-fragment-index="4">a command line names one profile.
+				To combine profiles, one extends another. An option on the line still wins over
+				any profile: <code>ace init tt ci -t esp32s3</code> builds for esp32s3.</p>
+		</div>
+	</div>
+	<aside class="notes">
+		Real output. The rules are in ace profile --help, in the sections
+		"Using another profile" and "Precedence": an option on the command line
+		overrides the profile, and the profile overrides the configuration
+		files. A later name in profile.extends wins over an earlier one.
+		profile.description and profile.type are not inherited.
+
+		Measured: ace init w esp32c6 ci fails with "too many arguments" (exit
+		2), and ace init tt ci -t esp32s3 printed "tt: esp32s3 in build-tt".
+		An extends loop is refused: "profile.extends: "a" reads its way back
+		to itself". A missing name: the error lists every directory searched.
 	</aside>
 </section>
 
@@ -1759,7 +2314,7 @@ settles      core.log-level = warn
 	<div class="container">
 		<div class="col">
 			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|4-5|6-7|8-11" class="yaml">
+				data-line-numbers="|4-5|6-7|8-11" class="yaml">
 profile:
   type: board
   description: ESP32-P4 Function EV Board
@@ -1772,23 +2327,53 @@ init:
     - espressif/esp32_p4_function_ev_board
     - espressif/esp32_p4_function_ev_board_noglib
 			</code></pre>
+			<pre class="tiny fragment" data-fragment-index="4"><code data-trim data-noescape class="plaintext">
+$ ace init p4 esp32_p4_function_ev_board
+ERROR: this build does not set
+       CONFIG_BSP_SELECT_ESP32_P4_FUNCTION_EV_BOARD, and provides none of
+       espressif/esp32_p4_function_ev_board,
+       espressif/esp32_p4_function_ev_board_noglib - one of them is what
+       this workspace was bound to need
+$ ace workspace list
+...
+* p4       esp32p4  build-p4 (not configured)
+...
+			</code></pre>
 		</div>
 		<div class="col">
 			<ul class="tight small">
 				<li class="fragment" data-fragment-index="1">the chip on the board</li>
 				<li class="fragment" data-fragment-index="2">the sdkconfig lines the hardware
-					needs, applied <b>before</b> the project's own defaults, so the project's own values take priority</li>
+					needs. ace writes them to a file and gives it to cmake as the first
+					defaults file.</li>
 				<li class="fragment" data-fragment-index="3">what the build must <b>contain</b> for
-					those lines to work: the support package for that board. It is written two
+					those lines to work: the support package for this board. It is written two
 					ways, and either one is enough.</li>
 				<li class="fragment" data-fragment-index="4">a build with neither fails after the
-					configure step, and the workspace is <b>not</b> marked as created</li>
+					configure step. The workspace is recorded, but not configured, and
+					<code>ace build</code> refuses it.</li>
 			</ul>
 		</div>
 	</div>
 	<aside class="notes">
+		internal/profile/builtin/esp32_p4_function_ev_board.yaml. The failure
+		is real: hello_world has neither the symbol nor the component. ace
+		build then said "workspace 'p4' has no configured build tree - run ace
+		init p4 first".
+
 		require-config and require-component state the same requirement two
-		ways, and either satisfying it is enough - a project may contain the BSP itself instead of depending on the registry component.
+		ways, and either is enough (checkRequired,
+		internal/workspace/create.go:345): a project may contain the BSP itself
+		instead of depending on the registry component.
+
+		Known problem, measured today. The file is meant to come before the
+		project's own defaults, so the project's values win (the ace init
+		manual; internal/cmake/configure.go:60-62). But when
+		init.sdkconfig-defaults is empty, ace passes only its own file in
+		SDKCONFIG_DEFAULTS, and ESP-IDF then skips the project's
+		sdkconfig.defaults (esp-idf tools/cmake/project.cmake:820-830). A
+		project with CONFIG_FREERTOS_HZ=500 in sdkconfig.defaults got 100 with
+		a profile that states sdkconfig lines, and 500 without one.
 	</aside>
 </section>
 
@@ -1798,7 +2383,7 @@ init:
 	<div class="container">
 		<div class="col">
 			<pre><code data-trim data-noescape data-fragment-index="1"
-			     data-line-numbers="|1-6|7|9" class="plaintext">
+				data-line-numbers="|1-6|7|9" class="plaintext">
 system      $ACE_HOME/profiles/
             + what the system's core.profiles names
 user        &lt;user config dir&gt;/ace/profiles/
@@ -1827,6 +2412,9 @@ built-in    the chips, the boards and default
 		</div>
 	</div>
 	<aside class="notes">
+		cmd/ace/profile.go:471-523 builds the list (profilesIn, profileDirs);
+		internal/profile/find.go, Find, searches it from the last to the first.
+
 		A team commits .aceprofiles and everyone who clones gets the same
 		build definitions with no setup step. That was the point.
 	</aside>
@@ -1850,7 +2438,7 @@ built-in    the chips, the boards and default
 		esp32c6, init prod esp32s3, workspace list, switch dev, status, config
 		set at the workspace scope, config list --all, and a failing switch.
 
-		This is the real thing in a real terminal - the colour is ace's own,
+		This is a real session in a real terminal - the colour is ace's own,
 		which none of the pasted output on the earlier slides shows, because
 		those were captured through a pipe and ace turns colour off when
 		stdout is not a terminal.
