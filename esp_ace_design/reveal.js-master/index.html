@@ -2109,45 +2109,61 @@ $ echo $?
 	<div class="container">
 		<div class="col">
 			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
-				data-line-numbers="|1-2|4-10|10|8" class="plaintext">
-$ ace init dev esp32c6
-dev: esp32c6 in build-dev
+				data-line-numbers="|1-3|5-9|11-12|14-16" class="plaintext">
+$ ace init s3 --target esp32s3 --build-dir build-esp32s3 \
+      --sdkconfig sdkconfig-esp32s3
+s3: esp32s3 in build-esp32s3
+
+# .aceprofiles/s3.yaml
+init:
+  target: esp32s3
+  build-dir: build-esp32s3
+  sdkconfig: sdkconfig-esp32s3
+
+$ ace init s3 s3
+s3: esp32s3 in build-esp32s3
 
 $ ace profile show esp32c6
-profile      esp32c6
-type         chip
-source       builtin
-file         &lt;built-in esp32c6&gt;
-description  RISC-V, WiFi 6 + BLE + 802.15.4
+...
 binds        init.target = esp32c6
 			</code></pre>
 		</div>
 		<div class="col">
 			<ul class="tight small">
-				<li class="fragment" data-fragment-index="1"><code>ace init &lt;workspace&gt;
-					&lt;profile&gt;</code>: the second word is the profile the workspace is made
-					from</li>
-				<li class="fragment" data-fragment-index="2"><code>ace profile show</code> prints what
-					a profile states, and where it comes from</li>
-				<li class="fragment" data-fragment-index="3">a chip profile states one key: the chip</li>
-				<li class="fragment" data-fragment-index="4">a profile is a YAML configuration file,
-					with the same keys, types and checks as the scopes. The ones ace ships are
-					built into the binary.</li>
+				<li class="fragment" data-fragment-index="1">without a profile, every value is an
+					option on the <code>ace init</code> line</li>
+				<li class="fragment" data-fragment-index="2">a profile states the same values as
+					keys. Each <code>ace init</code> option reads a key: <code>--target</code> is
+					<code>init.target</code>, <code>--build-dir</code> is
+					<code>init.build-dir</code>, <code>--sdkconfig</code> is
+					<code>init.sdkconfig</code>.</li>
+				<li class="fragment" data-fragment-index="3"><code>ace init &lt;workspace&gt;
+					&lt;profile&gt;</code>: the same workspace, and only two names are typed</li>
+				<li class="fragment" data-fragment-index="4">ace ships a profile for every chip,
+					and it states only the chip. So in <code>ace init dev esp32c6</code>,
+					<code>esp32c6</code> is a profile.</li>
 			</ul>
-			<p class="caption fragment" data-fragment-index="5">a profile is not a scope.
-				<code>ace init</code> reads it once, when it makes the workspace. Later commands
-				read the workspace, not the profile.</p>
+			<p class="caption fragment" data-fragment-index="5">a profile is a YAML configuration
+				file, with the same keys and checks as the scopes. It is not a scope:
+				<code>ace init</code> reads it once, when it makes the workspace.</p>
 		</div>
 	</div>
 	<aside class="notes">
-		Both outputs are real. ace profile --help says it the same way: "A
-		profile is a configuration file that states what a workspace is built
-		from. ace init reads the profile named on its command line and creates
-		the workspace from it."
+		Both ways are measured, each on a clean copy of hello_world. The two
+		commands printed the same line, and .ace/workspaces.yaml recorded the
+		same binding: target esp32s3, build-dir build-esp32s3, sdkconfig
+		sdkconfig-esp32s3, generator Ninja.
 
-		Not a scope: internal/profile/load.go, Load. The file never joins the
-		configuration chain, so its settings do not change the ace init run
-		that reads it.
+		The link between an option and its key is the Config field of each
+		option, cmd/ace/init.go:146-215. ace profile --help says the purpose
+		the same way: "Use a profile to keep the settings for a chip, for a
+		development board, or for a build you repeat often in one file, and
+		name that file instead of repeating the options."
+
+		An option on the line still wins over the profile (see the extends
+		slide). Not a scope: internal/profile/load.go, Load. The file never
+		joins the configuration chain, so its settings do not change the ace
+		init run that reads it.
 	</aside>
 </section>
 
@@ -2170,18 +2186,19 @@ $ ace profile list
 	<ul class="tight small">
 		<li class="fragment">one profile for each chip ace builds for: 14. They are made from the
 			chip list in the code, so a new chip gets a profile with no new file.</li>
-		<li class="fragment">one for each Espressif development board ace knows: 18 YAML files</li>
-		<li class="fragment"><code>default</code> is used when <code>ace init</code> names no
-			profile. It builds in <code>build</code>, with <code>sdkconfig</code>, where ESP-IDF's
-			own tools build.</li>
+		<li class="fragment">one for each Espressif development board ace knows: 18 YAML files,
+			compiled into the ace binary</li>
+		<li class="fragment"><code>default</code> builds in <code>build</code>, with
+			<code>sdkconfig</code>, where ESP-IDF's own tools build</li>
 		<li class="fragment">the project's own profiles come first. Here that is <code>ci</code>,
 			from <code>.aceprofiles/</code>.</li>
 	</ul>
-	<p class="caption fragment">all built into the binary. Nothing to download.</p>
 	<aside class="notes">
 		Real output, cut where it says "...". The chip profiles are made from
 		the target list (internal/profile/builtin.go:31-57); the boards and
-		default are internal/profile/builtin/*.yaml.
+		default are internal/profile/builtin/*.yaml, compiled in with
+		//go:embed (builtin.go:21-22). The ci row is a file in the project's
+		.aceprofiles/.
 
 		Boards used to be a table in internal/target/board.go, reached as the
 		second argument of ace init and listed by ace target list. Commit
@@ -2379,11 +2396,20 @@ $ ace workspace list
 
 <!-- SLIDE: where profiles come from -->
 <section>
-	<h2>Where a profile name is looked for</h2>
+	<h2>Which profile, and where ace looks for it</h2>
 	<div class="container">
 		<div class="col">
-			<pre><code data-trim data-noescape data-fragment-index="1"
-				data-line-numbers="|1-6|7|9" class="plaintext">
+			<pre class="tiny"><code data-trim data-noescape data-fragment-index="1"
+				data-line-numbers="|1-4|6-8|10-15|16|18" class="plaintext">
+$ ace init dev
+dev: esp32 in build
+$ ace config get workspace.default-profile
+default
+
+$ ace config set --scope project workspace.default-profile s3
+$ ace init
+default: esp32s3 in build-esp32s3
+
 system      $ACE_HOME/profiles/
             + what the system's core.profiles names
 user        &lt;user config dir&gt;/ace/profiles/
@@ -2397,23 +2423,44 @@ built-in    the chips, the boards and default
 		</div>
 		<div class="col">
 			<ul class="tight small">
-				<li class="fragment" data-fragment-index="1">each scope has a directory beside
+				<li class="fragment" data-fragment-index="1">no profile on the line: ace uses the
+					one that <code>workspace.default-profile</code> names, <code>default</code>.
+					It builds in <code>build</code>, with <code>sdkconfig</code>, where ESP-IDF's
+					own tools build.</li>
+				<li class="fragment" data-fragment-index="2">a project can name another one, or
+					ship its own <code>.aceprofiles/default.yaml</code>. A command that makes a
+					workspace for a project with none uses the same profile.</li>
+				<li class="fragment" data-fragment-index="3">each scope has a directory beside
 					its configuration file, plus what its <code>core.profiles</code> key names.
 					Searched from the last to the first: the closest scope takes priority.</li>
-				<li class="fragment" data-fragment-index="2"><code>--config</code> and
+				<li class="fragment" data-fragment-index="4"><code>--config</code> and
 					<code>-c</code> can name directories too, for one run</li>
-				<li class="fragment" data-fragment-index="3">the chips, the boards and
+				<li class="fragment" data-fragment-index="5">the chips, the boards and
 					<code>default</code> are built into the binary and asked last. So a project
 					can add <code>.aceprofiles/esp32c6.yaml</code> and <b>replace the one ace
 					provides</b>.</li>
-				<li class="fragment" data-fragment-index="4"><code>.aceprofiles</code> is
+				<li class="fragment" data-fragment-index="6"><code>.aceprofiles</code> is
 					searched whether or not the project has a configuration file</li>
 			</ul>
 		</div>
 	</div>
 	<aside class="notes">
-		cmd/ace/profile.go:471-523 builds the list (profilesIn, profileDirs);
-		internal/profile/find.go, Find, searches it from the last to the first.
+		The first two commands and their output are one real session in a
+		clean hello_world. s3 is the profile from the first profile slide
+		(.aceprofiles/s3.yaml). ace init dev with no profile builds in build,
+		not build-dev: the default profile states init.build-dir and
+		init.sdkconfig, and a profile wins over the configuration.
+
+		The code: named() in cmd/ace/init.go:382-391 and defaultProfile() in
+		cmd/ace/main.go:748-756. The workspace a command makes for a project
+		with none uses the same function (makeImplicit, main.go:714).
+		ace config describe workspace.default-profile explains it, and says
+		why default builds in build: "a .gitignore written for idf.py still
+		covers it". The key cannot be set in the workspace scope.
+
+		cmd/ace/profile.go:471-523 builds the list of directories
+		(profilesIn, profileDirs); internal/profile/find.go, Find, searches it
+		from the last to the first.
 
 		A team commits .aceprofiles and everyone who clones gets the same
 		build definitions with no setup step. That was the point.
